@@ -795,11 +795,6 @@ async def deal_reject(callback: types.CallbackQuery):
         )["Body"].read()
     )
 
-    deal["supplier_action"] = "REJECTED"
-    deal["admin_action"] = "REJECTED"
-    deal["final_status"] = "CLOSED"
-    unlock_stone(deal["stone_id"])
-
     log_deal_history(deal)
 
     s3.put_object(
@@ -1125,17 +1120,6 @@ async def supplier_view_deals(message: types.Message):
             "Supplier Action (ACCEPT / REJECT)": deal["supplier_action"]
         })
 
-    for obj in response.get("Contents", []):
-        if not obj["Key"].endswith(".json"):
-            continue
-
-        deal = json.loads(
-            s3.get_object(
-                Bucket=AWS_BUCKET,
-                Key=obj["Key"]
-            )["Body"].read()
-        )
-
         if deal.get("supplier_username") != supplier_username:
             continue
 
@@ -1355,13 +1339,8 @@ async def handle_text(message: types.Message):
                 user_state.pop(uid, None)
                 return
 
-            # 💾 SAVE DEAL AFTER LOCK
-            s3.put_object(
-                Bucket=AWS_BUCKET,
-                Key=f"{DEALS_FOLDER}{deal_id}.json",
-                Body=json.dumps(deal, indent=2),
-                ContentType="application/json"
-            )
+            # 💾 SAVE DEAL TO MONGODB
+            deals_col.insert_one(deal)
 
             # Notify supplier
             save_notification(
@@ -1418,6 +1397,7 @@ async def handle_text(message: types.Message):
             # ✅ Force everything to string
             df["USERNAME"] = df["USERNAME"].astype(str).str.strip().str.lower()
             df["PASSWORD"] = df["PASSWORD"].astype(str).str.strip()
+            df["PASSWORD"] = df["PASSWORD"].str.replace("\u00a0", "", regex=False)
             df["APPROVED"] = df["APPROVED"].astype(str).str.strip().str.upper()
             df["ROLE"] = df["ROLE"].astype(str).str.strip().str.lower()
 
@@ -1842,10 +1822,8 @@ async def handle_doc(message: types.Message):
             deal_id = str(row.get("Deal ID", "")).strip()
             admin_decision = str(row.get("Admin Action (YES / NO)", "")).strip().upper()
 
-            key = f"{DEALS_FOLDER}{deal_id}.json"
-            try:
-                deal = json.loads(s3.get_object(Bucket=AWS_BUCKET, Key=key)["Body"].read())
-            except:
+            deal = deals_col.find_one({"deal_id": deal_id})
+            if not deal:
                 continue
 
             if admin_decision == "YES" and deal["supplier_action"] == "ACCEPTED":
@@ -1865,11 +1843,9 @@ async def handle_doc(message: types.Message):
 
             log_deal_history(deal)
 
-            s3.put_object(
-                Bucket=AWS_BUCKET,
-                Key=key,
-                Body=json.dumps(deal, indent=2),
-                ContentType="application/json"
+            deals_col.update_one(
+               {"deal_id": deal_id},
+               {"$set": deal}
             )
 
         await message.reply("✅ Admin deal approvals processed.")
@@ -1910,7 +1886,6 @@ async def handle_doc(message: types.Message):
                 deal["supplier_action"] = "REJECTED"
                 deal["admin_action"] = "REJECTED"
                 deal["final_status"] = "CLOSED"
-                unlock_stone(deal["stone_id"])
 
                 # 🔓 UNLOCK STONE
                 unlock_stone(deal["stone_id"])
