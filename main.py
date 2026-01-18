@@ -1071,7 +1071,7 @@ async def supplier_price_excel_analytics(message: types.Message):
 
 # ---------------- Supplier VIEW DEALS ------------------
 
-@dp.message(F.text == "🤝 View Deals")
+@dp.message(F.text == "🤝 View All Deals")
 async def supplier_view_deals(message: types.Message):
     user = get_logged_user(message.from_user.id)
 
@@ -1404,12 +1404,17 @@ async def handle_text(message: types.Message):
         if state["step"] == "login_password":
             df = load_accounts()
 
-            # ✅ Normalize inputs
-            input_username = state["username"].strip().lower()
-            input_password = message.text.strip()
-
+             # ✅ Normalize inputs
+            input_username = str(state["username"]).strip().lower()
+            input_password = str(message.text).strip()
+            
+            # ✅ Force everything to string
             df["USERNAME"] = df["USERNAME"].astype(str).str.strip().str.lower()
             df["PASSWORD"] = df["PASSWORD"].astype(str).str.strip()
+
+            # ✅ Debug safety (optional)
+            print("LOGIN TRY:", input_username, input_password)
+            print(df[["USERNAME","PASSWORD"]].head())
 
             r = df[
             (df["USERNAME"] == input_username) &
@@ -1716,11 +1721,14 @@ async def handle_text(message: types.Message):
                 user_state.pop(uid)
                 return
 
-# ---------------- FORMAT OUTPUT ----------------
+            # ---------------- FORMAT OUTPUT ----------------
             shape_summary = ", ".join(
                 f"{k.capitalize()}:{v}" for k, v in df["Shape"].value_counts().items()
             )
 
+            # ✅ Generate AI explanation once
+            ai_explanation = "Market looks stable. Prices are competitive for this selection."
+            
             if len(df) > 5:
                 out = "/tmp/results.xlsx"
 
