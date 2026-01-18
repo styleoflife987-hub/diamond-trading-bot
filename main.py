@@ -1018,10 +1018,14 @@ async def supplier_price_excel_analytics(message: types.Message):
         diff = round(my_price - best_price, 2)
         status = "BEST PRICE" if diff == 0 else "OVERPRICED" if diff > 0 else "UNDERPRICED"
 
-        # ✅ AI Advice
-        system_prompt = (
-            "You are a diamond pricing consultant. "
-            "Give clear pricing advice in 2 short sentences."
+               ai_advice = ask_openai(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    telegram_id=message.from_user.id
+               )      
+               system_prompt = (
+               "You are a diamond pricing consultant. "
+               "Give clear pricing advice in 2 short sentences."
         )
 
         user_prompt = f"""
@@ -1399,12 +1403,23 @@ async def handle_text(message: types.Message):
 
         if state["step"] == "login_password":
             df = load_accounts()
-            r = df[(df["USERNAME"] == state["username"]) & (df["PASSWORD"] == message.text)]
+
+            # ✅ Normalize inputs
+            input_username = state["username"].strip().lower()
+            input_password = message.text.strip()
+
+            df["USERNAME"] = df["USERNAME"].astype(str).str.strip().str.lower()
+            df["PASSWORD"] = df["PASSWORD"].astype(str).str.strip()
+
+            r = df[
+            (df["USERNAME"] == input_username) &
+            (df["PASSWORD"] == input_password)
+            ]
 
             if r.empty:
                 await message.reply("❌ Login failed. Invalid username or password.")
-                user_state.pop(uid)
-                return
+                user_state.pop(uid, None)
+                return     
 
             if r.iloc[0]["APPROVED"] != "YES":
                 await message.reply("❌ Your account is not approved yet.")
