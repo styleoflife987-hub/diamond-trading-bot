@@ -43,6 +43,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
 
 db = client["diamond_bot"]
+users_col = db["users"]
 
 deals_col = db["deals"]
 users_col = db["users"]
@@ -57,6 +58,29 @@ from openai import OpenAI
 from pymongo import MongoClient
 from bson import ObjectId
 
+# ---------------- MONGODB CONNECTION ----------------
+
+from pymongo import MongoClient
+import os
+
+MONGO_URI = os.getenv("MONGO_URI")
+
+if not MONGO_URI:
+    raise Exception("❌ MONGO_URI environment variable not set")
+
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client["diamond_bot"]
+
+# Collections
+accounts_col = db["accounts"]
+stock_col = db["stock"]
+deals_col = db["deals"]
+activity_col = db["activity"]
+notifications_col = db["notifications"]
+locks_col = db["locks"]
+sessions_col = db["sessions"]
+
+print("✅ MongoDB connected successfully")
 
 
 # ---------------- DEAL STATE VALIDATION ----------------
@@ -285,11 +309,6 @@ def ask_openai(system_prompt, user_prompt, temperature=0.2, telegram_id=None):
     except Exception:
         return "⚠️ AI service unavailable."
 
-
-def load_accounts():
-    data = list(accounts_col.find({}, {"_id": 0}))
-    return pd.DataFrame(data)
-
 def load_stock():
     records = list(stock_col.find({}, {"_id": 0}))
     if not records:
@@ -338,6 +357,21 @@ def unlock_stone(stone_id):
         {"stone_id": stone_id},
         {"$set": {"locked": False}}
     )
+
+# ---------------- LOAD STOCK FROM MONGODB ----------------
+
+def load_stock_df():
+    rows = []
+
+    for doc in stock_col.find({}, {"_id": 0, "rows": 1}):
+        rows.extend(doc.get("rows", []))
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    return df
+
 
 
 # ---------------- STATE ----------------
@@ -468,7 +502,7 @@ async def smart_deals(message: types.Message):
         await message.reply("❌ Smart Deals are available for clients only.")
         return
 
-    df = load_stock()
+    df = load_stock_df()
     df = df[df["LOCKED"] != "YES"]
     if df.empty:
         await message.reply("❌ No stock available.")
@@ -771,7 +805,7 @@ async def view_all_stock(message: types.Message):
         await message.reply("❌ Admin only")
         return
 
-    df = load_stock()
+    df = load_stock_df()
     if df.empty:
         await message.reply("❌ No stock available")
         return
@@ -819,7 +853,7 @@ async def supplier_leaderboard(message: types.Message):
         await message.reply("❌ Admin only")
         return
 
-    df = load_stock()
+    df = load_stock_df()
     if df.empty:
         await message.reply("❌ No stock available")
         return
@@ -903,7 +937,7 @@ async def supplier_price_excel_analytics(message: types.Message):
         return
 
     supplier_name = user.get("SUPPLIER_KEY")
-    df = load_stock()
+    df = load_stock_df()
     if df.empty:
         await message.reply("❌ No market stock available.")
         return
@@ -1086,7 +1120,7 @@ async def request_deal_start(message: types.Message):
     if not user or user["ROLE"] != "client":
         return
 
-    df = load_stock()
+    df = load_stock_df()
     if df.empty:
         await message.reply("❌ No stock available.")
         return
@@ -1188,7 +1222,7 @@ async def handle_text(message: types.Message):
                 return
 
             stone_id = state["stone_id"]
-            df = load_stock()
+            df = load_stock_df()
 
             if df.empty:
                 await message.reply("❌ No stock available.")
@@ -1281,78 +1315,45 @@ async def handle_text(message: types.Message):
 
 
         if state.get("step") == "login_password":
-            df = load_accounts()
 
-            # ✅ Normalize input
             input_username = str(state.get("username", "")).strip().lower()
             input_password = str(message.text).strip()
 
-            # ✅ Clean dataframe safely
-            df["USERNAME"] = (
-                df["USERNAME"]
-                .astype(str)
-                .str.replace("\u00a0", "", regex=False)
-                .str.strip()
-                .str.lower()
-            )
+            # 🔍 Find user in MongoDB
+            user_doc = users_col.find_one({
+                "username": input_username
+            })
 
-            df["PASSWORD"] = (
-                df["PASSWORD"]
-                .astype(str)
-                .str.replace("\u00a0", "", regex=False)
-                .str.strip()
-            )
-
-            df["APPROVED"] = (
-                df["APPROVED"]
-                .astype(str)
-                .str.strip()
-                .str.upper()
-            )
-
-            df["ROLE"] = (
-                df["ROLE"]
-                .astype(str)
-                .str.strip()
-                .str.lower()
-            )
-
-            r = df[df["USERNAME"] == input_username]
-
-            if r.empty:
-                await message.reply("❌ Login failed.")
-                user_state.pop(uid, None)
-                return
-
-            stored_hash = str(r.iloc[0]["PASSWORD"])
-
-            if not bcrypt.verify(input_password, stored_hash):
-                await message.reply("❌ Login failed.")
-                user_state.pop(uid, None)
-                return
-
-
-            if r.empty:
+            if not user_doc:
                 await message.reply("❌ Login failed. Invalid username or password.")
                 user_state.pop(uid, None)
                 return
 
-            if r.iloc[0]["APPROVED"] != "YES":
+            # 🔐 Verify password hash
+            if not bcrypt.verify(input_password, user_doc["password"]):
+                await message.reply("❌ Login failed. Invalid username or password.")
+                user_state.pop(uid, None)
+                return
+
+            # 🚫 Approval check
+            if not user_doc.get("approved", False):
                 await message.reply("❌ Your account is not approved yet.")
                 user_state.pop(uid, None)
                 return
 
-            # 🔑 Role
-            role = r.iloc[0]["ROLE"]
-            if r.iloc[0]["USERNAME"].lower() == "prince":
+            # 🎭 Role
+            role = user_doc.get("role", "client")
+
+            # 👑 Force Prince admin
+            if user_doc["username"].lower() == "prince":
                 role = "admin"
 
             # ✅ Save session
             logged_in_users[uid] = {
-                "USERNAME": r.iloc[0]["USERNAME"],
+                "USERNAME": user_doc["username"],
                 "ROLE": role,
                 "SUPPLIER_KEY": (
-                    f"supplier_{r.iloc[0]['USERNAME'].lower()}"
+                    f"supplier_{user_doc['username']}"
                     if role == "supplier"
                     else None
                 ),
@@ -1371,7 +1372,7 @@ async def handle_text(message: types.Message):
             else:
                 kb = types.ReplyKeyboardRemove()
 
-            username = r.iloc[0]["USERNAME"].capitalize()
+            username = user_doc["username"].capitalize()
 
             welcome_map = {
                 "admin": f"👑 Welcome Admin {username}",
@@ -1398,6 +1399,7 @@ async def handle_text(message: types.Message):
 
             user_state.pop(uid, None)
             return
+
 
 
 
@@ -1478,7 +1480,7 @@ async def handle_text(message: types.Message):
         if state["step"] == "search_clarity":
             search["clarity"] = text
 
-            df = load_stock()
+            df = load_stock_df()
             if df.empty:
                 await message.reply("❌ No diamonds available")
                 user_state.pop(uid)
@@ -1686,7 +1688,7 @@ async def handle_doc(message: types.Message):
         await bot.download_file(file.file_path, path)
 
         df = pd.read_excel(path)
-        stock_df = load_stock()
+        stock_df = load_stock_df()
 
         for _, row in df.iterrows():
             stone_id = str(row.get("Stock #", "")).strip()
@@ -1936,6 +1938,32 @@ async def handle_doc(message: types.Message):
     )
 
     await message.reply(summary_msg)
+
+# ---------------- INIT ADMIN USER (RUN ONCE) ----------------
+from passlib.hash import bcrypt
+
+def init_admin_user():
+    username = "prince"
+    password = "123456"   # 🔴 Change this immediately after first login!
+
+    if users_col.find_one({"username": username}):
+        print("✅ Admin already exists")
+        return
+
+    password_hash = bcrypt.hash(password)
+
+    users_col.insert_one({
+        "username": username,
+        "password": password_hash,
+        "role": "admin",
+        "approved": True,
+        "created_at": datetime.utcnow()
+    })
+
+    print("✅ Admin user created")
+
+# Run once at startup
+init_admin_user()
 
 # ---------------- MAIN ----------------
 
