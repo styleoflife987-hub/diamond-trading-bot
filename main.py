@@ -1416,18 +1416,16 @@ async def handle_text(message: types.Message):
             input_username = str(state["username"]).strip().lower()
             input_password = str(message.text).strip()
 
-            # ✅ Normalize Excel data safely
+            # ✅ Force everything to string
             df["USERNAME"] = df["USERNAME"].astype(str).str.strip().str.lower()
             df["PASSWORD"] = df["PASSWORD"].astype(str).str.strip()
             df["APPROVED"] = df["APPROVED"].astype(str).str.strip().str.upper()
             df["ROLE"] = df["ROLE"].astype(str).str.strip().str.lower()
 
-            # 🧪 DEBUG (keep for now)
+            # ✅ Debug safety
             print("LOGIN TRY:", input_username, input_password)
-            print("EXCEL SAMPLE:")
             print(df[["USERNAME", "PASSWORD", "APPROVED", "ROLE"]].head())
 
-            # ✅ Match user
             r = df[
                 (df["USERNAME"] == input_username) &
                 (df["PASSWORD"] == input_password)
@@ -1436,7 +1434,7 @@ async def handle_text(message: types.Message):
             if r.empty:
                 await message.reply("❌ Login failed. Invalid username or password.")
                 user_state.pop(uid, None)
-                return     
+                return
 
             if r.iloc[0]["APPROVED"] != "YES":
                 await message.reply("❌ Your account is not approved yet.")
@@ -1447,9 +1445,8 @@ async def handle_text(message: types.Message):
             role = r.iloc[0]["ROLE"]
             if r.iloc[0]["USERNAME"].lower() == "prince":
                 role = "admin"
-            # -----------------------------------------------
+            # ------------------------------------------------
 
-            # ✅ Save logged user
             logged_in_users[uid] = {
                 "USERNAME": r.iloc[0]["USERNAME"],
                 "ROLE": role,
@@ -1459,7 +1456,7 @@ async def handle_text(message: types.Message):
             save_sessions()
             log_activity(logged_in_users[uid], "LOGIN")
 
-            # ✅ Assign keyboard
+            # Assign keyboard
             if role == "admin":
                 kb = admin_kb
             elif role == "client":
@@ -1472,13 +1469,13 @@ async def handle_text(message: types.Message):
             username = r.iloc[0]["USERNAME"].capitalize()
 
             if role == "admin":
-                welcome_msg = f"👑 Welcome back, Admin {username}"
+                welcome_msg = f"👑 Welcome back, Admin {username} — command, control, excellence."
             elif role == "supplier":
-                welcome_msg = f"💎 Welcome, Supplier {username}"
+                welcome_msg = f"💎 Welcome, Supplier {username} — your brilliance drives the market."
             elif role == "client":
-                welcome_msg = f"🥂 Welcome, {username}"
+                welcome_msg = f"🥂 Welcome, {username} — discover diamonds beyond ordinary."
             else:
-                welcome_msg = f"Welcome, {username}"
+                welcome_msg = f"Welcome, {username}."
 
             await message.reply(welcome_msg, reply_markup=kb)
 
@@ -1496,6 +1493,7 @@ async def handle_text(message: types.Message):
 
             user_state.pop(uid, None)
             return
+
 
     # -------- BUTTON HANDLING --------
     user = get_logged_user(uid)
