@@ -1018,14 +1018,22 @@ async def supplier_price_excel_analytics(message: types.Message):
         diff = round(my_price - best_price, 2)
         status = "BEST PRICE" if diff == 0 else "OVERPRICED" if diff > 0 else "UNDERPRICED"
 
-               ai_advice = ask_openai(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
-                    telegram_id=message.from_user.id
-               )      
-               system_prompt = (
-               "You are a diamond pricing consultant. "
-               "Give clear pricing advice in 2 short sentences."
+        # ✅ AI Prompt
+        system_prompt = (
+            "You are a diamond pricing consultant. "
+            "Give clear pricing advice in 2 short sentences."
+        )
+
+        user_prompt = (
+            f"My price: {my_price}, Market best price: {best_price}. "
+            f"Status: {status}. Give advice."
+        )
+
+        # ✅ Call AI safely (aligned indentation)
+        ai_advice = ask_openai(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            telegram_id=message.from_user.id
         )
 
         user_prompt = f"""
