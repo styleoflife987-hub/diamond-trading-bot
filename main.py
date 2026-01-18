@@ -11,6 +11,24 @@ from aiogram.filters import Command
 from aiogram import types
 import os
 import json
+
+from pymongo import MongoClient
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+MONGO_URI = os.getenv("MONGO_URI")
+client = MongoClient(MONGO_URI)
+
+db = client["diamond_bot"]
+
+deals_col = db["deals"]
+users_col = db["users"]
+activity_col = db["activity"]
+locks_col = db["locks"]
+notifications_col = db["notifications"]
+
 import pytz
 import uuid
 from openai import OpenAI
@@ -1153,28 +1171,9 @@ async def admin_view_deals(message: types.Message):
         await message.reply("❌ Admin only")
         return
 
-    # Fetch all deal JSONs from S3
-    try:
-        response = s3.list_objects_v2(Bucket=AWS_BUCKET, Prefix=DEALS_FOLDER)
-        objects = response.get("Contents", [])
-        if not objects:
-            await message.reply("ℹ️ No deals found.")
-            return
-    except Exception as e:
-        await message.reply(f"❌ Error fetching deals: {str(e)}")
-        return
-
     rows = []
-    for obj in objects:
-        key = obj["Key"]
-        if not key.endswith(".json"):
-            continue
-        try:
-            deal_obj = s3.get_object(Bucket=AWS_BUCKET, Key=key)
-            deal = json.loads(deal_obj["Body"].read())
-        except Exception as e:
-            continue  # skip corrupt files
 
+    for deal in deals_col.find():
         rows.append({
             "Deal ID": deal.get("deal_id", ""),
             "Stock #": deal.get("stone_id", ""),
@@ -1191,6 +1190,7 @@ async def admin_view_deals(message: types.Message):
     if not rows:
         await message.reply("ℹ️ No deals found.")
         return
+
 
     # Convert to Excel
     df = pd.DataFrame(rows)
