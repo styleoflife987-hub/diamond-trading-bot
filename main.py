@@ -1036,154 +1036,86 @@ async def view_deals(message: types.Message):
         await message.reply("ℹ️ User not found.")
         return
 
-    objs = s3.list_objects_v2(
-        Bucket=AWS_BUCKET,
-        Prefix=DEALS_FOLDER
-    )
-
+    objs = s3.list_objects_v2(Bucket=AWS_BUCKET, Prefix=DEALS_FOLDER)
     if "Contents" not in objs or not objs["Contents"]:
         await message.reply("ℹ️ No deals available.")
         return
 
-    found = False
-
-    # ✅ MISSING LOOP FIXED HERE
+    deals = []
     for obj in objs["Contents"]:
-        if not obj["Key"].endswith(".json"):
-            continue
-
-        deal_obj = s3.get_object(
-            Bucket=AWS_BUCKET,
-            Key=obj["Key"]
-        )
-
-        deal = json.loads(
-            deal_obj["Body"].read().decode("utf-8")
-        )
-
-        # ---------- SAFETY DEFAULTS ----------
-        supplier_price = deal.get("actual_stock_price", 0)
-        client_price = deal.get("client_offer_price", 0)
-        admin_profit = deal.get("admin_profit_value", 0)
-
-        supplier_action = deal.get("supplier_action", "")
-        admin_action = deal.get("admin_action", "")
-        final_status = deal.get("final_status", "")
-
-        # (rest of your existing logic continues below...)
-
-
-        # =================================================
-        # ================= SUPPLIER VIEW =================
-        # =================================================
-        if user["ROLE"] == "supplier":
-
-            supplier = user["USERNAME"].lower()
-            rows = []
-
-            for obj in objs["Contents"]:
-                if not obj["Key"].endswith(".json"):
-                    continue
-
+        if obj["Key"].endswith(".json"):
+            try:
                 deal = json.loads(
-                    s3.get_object(
-                        Bucket=AWS_BUCKET,
-                        Key=obj["Key"]
-                    )["Body"].read()
+                    s3.get_object(Bucket=AWS_BUCKET, Key=obj["Key"])["Body"].read()
                 )
+                deals.append(deal)
+            except:
+                continue
 
-                if deal.get("supplier_username", "").lower() != supplier:
-                    continue
+    # ---------------- SUPPLIER VIEW ----------------
+    if user["ROLE"] == "supplier":
+        supplier = user["USERNAME"].lower()
+
+        rows = [
+            {
+                "Deal ID": d["deal_id"],
+                "Stock #": d["stone_id"],
+                "Client": d["client_username"],
+                "Actual Price ($/ct)": d.get("actual_stock_price", 0),
+                "Client Offer ($/ct)": d.get("client_offer_price", 0),
+                "Supplier Action": d.get("supplier_action"),
+                "Admin Action": d.get("admin_action"),
+                "Final Status": d.get("final_status"),
+            }
+            for d in deals
+            if d.get("supplier_username", "").lower() == supplier
+        ]
+
+        if not rows:
+            await message.reply("ℹ️ No deals found.")
+            return
+
+        df = pd.DataFrame(rows)
+        path = f"/tmp/{supplier}_deals.xlsx"
+        df.to_excel(path, index=False)
+
+        await message.reply_document(types.FSInputFile(path), caption="📊 Your Deals")
+        return
+
+    # ---------------- ADMIN VIEW ----------------
+    if user["ROLE"] == "admin":
+        rows = []
+
+        for d in deals:
+            if d.get("supplier_action") == "ACCEPTED" and d.get("admin_action") == "PENDING":
+                actual = float(d.get("actual_stock_price", 0))
+                offer = float(d.get("client_offer_price", 0))
+                profit = round(offer - actual, 2)
 
                 rows.append({
-                    "Deal ID": deal["deal_id"],
-                    "Stock #": deal["stone_id"],
-                    "Client": deal["client_username"],
-                    "Actual Price ($/ct)": deal.get("actual_stock_price", 0),
-                    "Client Offer ($/ct)": deal.get("client_offer_price", 0),
-                    "Supplier Action (ACCEPT / REJECT)": deal.get("supplier_action"),
-                    "Admin Action": deal.get("admin_action"),
-                    "Final Status": deal.get("final_status")
+                    "Deal ID": d["deal_id"],
+                    "Stock #": d["stone_id"],
+                    "Supplier": d["supplier_username"],
+                    "Client": d["client_username"],
+                    "Actual Price ($/ct)": actual,
+                    "Offer Price ($/ct)": offer,
+                    "Profit / Loss ($/ct)": profit,
+                    "Supplier Action (ACCEPT / REJECT)": "",
+                    "Admin Action (YES / NO)": "",
                 })
 
-            if not rows:
-                await message.reply("ℹ️ No deals found.")
-                return
-
-            df = pd.DataFrame(rows)
-            path = f"/tmp/{supplier}_{int(time.time())}_deals.xlsx"
-            df.to_excel(path, index=False)
-
-            await message.reply_document(
-                types.FSInputFile(path),
-                caption="📊 Your Deals (Excel Only)"
-            )
-
+        if not rows:
+            await message.reply("ℹ️ No deals pending admin approval.")
             return
 
+        df = pd.DataFrame(rows)
+        path = "/tmp/admin_pending_deals.xlsx"
+        df.to_excel(path, index=False)
 
-        # =================================================
-        # ================== ADMIN VIEW ===================
-        # =================================================
-        elif user["ROLE"] == "admin":
-
-            rows = []
-
-            for obj in objs["Contents"]:
-                if not obj["Key"].endswith(".json"):
-                    continue
-
-                deal = json.loads(
-                    s3.get_object(
-                        Bucket=AWS_BUCKET,
-                        Key=obj["Key"]
-                    )["Body"].read()
-                )
-
-                # 🔐 Only deals needing admin action
-                if (
-                    deal.get("supplier_action") == "ACCEPTED"
-                    and deal.get("admin_action") == "PENDING"
-                ):
-                    actual = pd.to_numeric(
-                        deal.get("actual_stock_price", 0), errors="coerce"
-                    )
-                    actual = 0 if pd.isna(actual) else actual
-
-                    offer = pd.to_numeric(
-                        deal.get("client_offer_price", 0), errors="coerce"
-                    )
-                    offer = 0 if pd.isna(offer) else offer
-
-                    profit = round(offer - actual, 2)
-
-                    rows.append({
-                        "Deal ID": deal["deal_id"],
-                        "Stock #": deal["stone_id"],
-                        "Supplier": deal["supplier_username"],
-                        "Client": deal["client_username"],
-                        "Actual Price ($/ct)": actual,
-                        "Offer Price ($/ct)": offer,
-                        "Profit / Loss ($/ct)": profit,
-                        "Supplier Action (ACCEPT / REJECT)": deal.get("supplier_action"),
-                        "Admin Action (YES / NO)": ""
-                    })
-
-            if not rows:
-                await message.reply("ℹ️ No deals pending admin approval.")
-                return
-
-            df = pd.DataFrame(rows)
-            path = "/tmp/admin_pending_deals.xlsx"
-            df.to_excel(path, index=False)
-
-            await message.reply_document(
-                types.FSInputFile(path),
-                caption="📊 Pending Deals for Admin Approval\nFill YES / NO and re-upload"
-            )
-
-            return
-
+        await message.reply_document(
+            types.FSInputFile(path),
+            caption="📊 Pending Deals for Admin Approval"
+        )
 
 # ---------------- START DEAL REQUEST ----------------
 
@@ -1277,6 +1209,12 @@ async def handle_text(message: types.Message):
 
             r = row.iloc[0]
 
+            # 🔒 Prevent deal on locked stone
+            if r.get("LOCKED") == "YES":
+                await message.reply("🔒 This stone is already locked in another deal.")
+                user_state.pop(uid, None)
+                return
+
             deal_id = f"DEAL-{uuid.uuid4().hex[:10]}"
 
             actual_price = pd.to_numeric(r["Price Per Carat"], errors="coerce") or 0
@@ -1303,18 +1241,16 @@ async def handle_text(message: types.Message):
                 ).strftime("%Y-%m-%d %H:%M"),
             }
 
-            # Save deal
+           # Save deal
             s3.put_object(
                 Bucket=AWS_BUCKET,
                 Key=f"{DEALS_FOLDER}{deal_id}.json",
                 Body=json.dumps(deal, indent=2),
                 ContentType="application/json"
             )
-            
-            df_stock = load_stock()
-            df_stock.loc[df_stock["Stock #"] == stone_id, "LOCKED"] = "YES"
-            df_stock.to_excel("/tmp/all_suppliers_stock.xlsx", index=False)
-            s3.upload_file("/tmp/all_suppliers_stock.xlsx", AWS_BUCKET, COMBINED_STOCK_KEY)
+
+            # 🔒 Lock stone safely
+            lock_stone(stone_id)
 
             # Notify supplier
             save_notification(
@@ -1705,6 +1641,18 @@ async def handle_text(message: types.Message):
             user_state.pop(uid)
             return
 
+# ---------------- SAFE STOCK LOCK ----------------
+
+def lock_stone(stone_id: str):
+    df = load_stock()
+    if df.empty:
+        return
+
+    df.loc[df["Stock #"] == stone_id, "LOCKED"] = "YES"
+    temp = "/tmp/all_suppliers_stock.xlsx"
+    df.to_excel(temp, index=False)
+    s3.upload_file(temp, AWS_BUCKET, COMBINED_STOCK_KEY)
+
 # ---------------- DOCUMENT HANDLER ----------------
 
 @dp.message(F.document)
@@ -1744,7 +1692,10 @@ async def handle_doc(message: types.Message):
             except:
                 continue
 
-            stock_row = stock_df[stock_df["Stock #"] == stone_id]
+            stock_row = stock_df[
+                (stock_df["Stock #"] == stone_id) &
+                (stock_df.get("LOCKED", "NO") != "YES")
+            ]
 
             if stock_row.empty:
                 continue
@@ -1775,10 +1726,8 @@ async def handle_doc(message: types.Message):
                 ContentType="application/json"
             )
             
-            df_stock = load_stock()
-            df_stock.loc[df_stock["Stock #"] == stone_id, "LOCKED"] = "YES"
-            df_stock.to_excel("/tmp/all_suppliers_stock.xlsx", index=False)
-            s3.upload_file("/tmp/all_suppliers_stock.xlsx", AWS_BUCKET, COMBINED_STOCK_KEY)
+            # 🔒 Lock stone safely
+            lock_stone(stone_id)
 
             save_notification(
                 supplier,
@@ -1838,6 +1787,11 @@ async def handle_doc(message: types.Message):
         for _, row in df.iterrows():
 
             deal_id = str(row["Deal ID"]).strip()
+
+            # ✅ Validate Deal ID
+            if not deal_id.startswith("DEAL-"):
+                continue
+
             supplier_decision = str(
                 row["Supplier Action (ACCEPT / REJECT)"]
             ).strip().upper()
@@ -1856,10 +1810,15 @@ async def handle_doc(message: types.Message):
                 )
             except:
                 continue
+                
+        # 🚫 Prevent editing closed deals
+        if deal.get("final_status") in ["COMPLETED", "CLOSED"]:
+            continue
 
-            # ---------------- SUPPLIER ACTION ----------------
-            if supplier_decision == "ACCEPT":
-                deal["supplier_action"] = "ACCEPTED"
+# ---------------- SUPPLIER ACTION ----------------
+if supplier_decision == "ACCEPT":
+    deal["supplier_action"] = "ACCEPTED"
+deal["supplier_action"] = "ACCEPTED"
 
             elif supplier_decision == "REJECT":
                 deal["supplier_action"] = "REJECTED"
