@@ -99,10 +99,6 @@ def generate_activity_excel():
 
         rows = []
 
-        for obj in objs["Contents"]:
-            if not obj["Key"].endswith(".json"):
-                continue
-
             data = json.loads(
                 s3.get_object(
                     Bucket=AWS_BUCKET,
@@ -1022,15 +1018,11 @@ async def view_deals(message: types.Message):
 
     found = False
 
-    for obj in objs["Contents"]:
-        if not obj["Key"].endswith(".json"):
-            continue
-
         deal_obj = s3.get_object(
             Bucket=AWS_BUCKET,
             Key=obj["Key"]
         )
-        deal = json.loads(deal_obj["Body"].read())
+        deal = json.loads(deal_obj["Body"].read().decode("utf-8"))
 
         # ---------- SAFETY DEFAULTS ----------
         supplier_price = deal.get("actual_stock_price", 0)
@@ -1097,10 +1089,6 @@ async def view_deals(message: types.Message):
 
             rows = []
 
-            for obj in objs["Contents"]:
-                if not obj["Key"].endswith(".json"):
-                    continue
-
                 deal = json.loads(
                     s3.get_object(
                         Bucket=AWS_BUCKET,
@@ -1113,7 +1101,8 @@ async def view_deals(message: types.Message):
                     deal.get("supplier_action") == "ACCEPTED"
                     and deal.get("admin_action") == "PENDING"
                 ):
-                    actual = pd.to_numeric(deal.get("actual_stock_price", 0), errors="coerce") or 0
+                    actual = pd.to_numeric(deal.get("actual_stock_price", 0), errors="coerce")
+                    actual = 0 if pd.isna(actual) else actual
                     offer = pd.to_numeric(deal.get("client_offer_price", 0), errors="coerce") or 0
                     profit = round(offer - actual, 2)
 
@@ -1694,7 +1683,7 @@ async def handle_doc(message: types.Message):
         supplier_rows = {}
 
         for _, row in df.iterrows():
-            if "Stock #" not in row or "Offer Price ($/ct)" not in row:
+            if pd.isna(row.get("Stock #")) or pd.isna(row.get("Offer Price ($/ct)")):
                 continue
 
             stone_id = str(row["Stock #"]).strip()
@@ -1772,7 +1761,7 @@ async def handle_doc(message: types.Message):
     # ==========================================================
     # ✅ ADMIN DEAL APPROVAL EXCEL (MUST BE BEFORE SUPPLIER CHECK)
     # ==========================================================
-    if user["ROLE"] == "admin" and "admin_pending_deals" in message.document.file_name.lower():
+    if user["ROLE"] == "admin" and message.document.file_name.lower().endswith(".xlsx"):
 
         file = await bot.get_file(message.document.file_id)
         path = f"/tmp/{message.document.file_name}"
