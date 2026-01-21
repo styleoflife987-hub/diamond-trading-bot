@@ -1310,8 +1310,10 @@ async def handle_text(message: types.Message):
                 Body=json.dumps(deal, indent=2),
                 ContentType="application/json"
             )
-            df.loc[df["Stock #"] == stone_id, "LOCKED"] = "YES"
-            df.to_excel("/tmp/all_suppliers_stock.xlsx", index=False)
+            
+            df_stock = load_stock()
+            df_stock.loc[df_stock["Stock #"] == stone_id, "LOCKED"] = "YES"
+            df_stock.to_excel("/tmp/all_suppliers_stock.xlsx", index=False)
             s3.upload_file("/tmp/all_suppliers_stock.xlsx", AWS_BUCKET, COMBINED_STOCK_KEY)
 
             # Notify supplier
@@ -1772,6 +1774,11 @@ async def handle_doc(message: types.Message):
                 Body=json.dumps(deal, indent=2),
                 ContentType="application/json"
             )
+            
+            df_stock = load_stock()
+            df_stock.loc[df_stock["Stock #"] == stone_id, "LOCKED"] = "YES"
+            df_stock.to_excel("/tmp/all_suppliers_stock.xlsx", index=False)
+            s3.upload_file("/tmp/all_suppliers_stock.xlsx", AWS_BUCKET, COMBINED_STOCK_KEY)
 
             save_notification(
                 supplier,
