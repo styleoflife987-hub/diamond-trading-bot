@@ -14,6 +14,7 @@ import os
 import json
 import pytz
 import uuid
+import time
 
 
 
@@ -150,18 +151,21 @@ def log_deal_history(deal):
        ])
 
 
-    df.loc[len(df)] = [
-        deal["deal_id"],
-        deal["stone_id"],
-        deal["supplier_username"],
-        deal["client_username"],
-        deal["actual_stock_price"],
-        deal["client_offer_price"],
-        deal["supplier_action"],
-        deal["admin_action"],
-        deal["final_status"],
-        deal["created_at"]
-    ]
+    df = pd.concat([
+        df,
+        pd.DataFrame([{
+            "Deal ID": deal.get("deal_id"),
+            "Stone ID": deal.get("stone_id"),
+            "Supplier": deal.get("supplier_username"),
+            "Client": deal.get("client_username"),
+            "Actual Price": deal.get("actual_stock_price"),
+            "Offer Price": deal.get("client_offer_price"),
+            "Supplier Action": deal.get("supplier_action"),
+            "Admin Action": deal.get("admin_action"),
+            "Final Status": deal.get("final_status"),
+            "Created At": deal.get("created_at"),
+        }])
+    ], ignore_index=True)
 
     df.to_excel("/tmp/deal_history.xlsx", index=False)
     s3.upload_file("/tmp/deal_history.xlsx", AWS_BUCKET, DEAL_HISTORY_KEY)
@@ -1075,7 +1079,7 @@ async def view_deals(message: types.Message):
                 return
 
             df = pd.DataFrame(rows)
-            path = f"/tmp/{supplier}_deals.xlsx"
+            path = f"/tmp/{supplier}_{int(time.time())}_deals.xlsx"
             df.to_excel(path, index=False)
 
             await message.reply_document(
@@ -1109,13 +1113,13 @@ async def view_deals(message: types.Message):
                     deal.get("supplier_action") == "ACCEPTED"
                     and deal.get("admin_action") == "PENDING"
                 ):
-                    actual = float(deal.get("actual_stock_price", 0))
-                    offer = float(deal.get("client_offer_price", 0))
+                    actual = pd.to_numeric(deal.get("actual_stock_price", 0), errors="coerce") or 0
+                    offer = pd.to_numeric(deal.get("client_offer_price", 0), errors="coerce") or 0
                     profit = round(offer - actual, 2)
 
                     rows.append({
                         "Deal ID": deal["deal_id"],
-                        "Stone ID": deal["stone_id"],
+                        "Stock #": deal["stone_id"],
                         "Supplier": deal["supplier_username"],
                         "Client": deal["client_username"],
                         "Actual Price ($/ct)": actual,
@@ -1239,7 +1243,7 @@ async def handle_text(message: types.Message):
 
             deal_id = f"DEAL-{uuid.uuid4().hex[:10]}"
 
-            actual_price = float(r["Price Per Carat"])
+            actual_price = pd.to_numeric(r["Price Per Carat"], errors="coerce") or 0
 
             # Allow any offer price (lower / equal / higher)
             admin_profit_value = round(offer_price - actual_price, 2)
@@ -1260,7 +1264,7 @@ async def handle_text(message: types.Message):
 
                 "created_at": datetime.now(
                     pytz.timezone("Asia/Kolkata")
-                ).strftime("%Y-%m-%d %H:%M")
+                ).strftime("%Y-%m-%d %H:%M"),
             }
 
             # Save deal
@@ -1437,7 +1441,7 @@ async def handle_text(message: types.Message):
             "TABLE %": [57, 58, 59],
             "DEPTH %": [61, 62, 63],
             "VIDEO": ["link1", "link2", "link3"],
-            "REPORT NO": ["R001", "R002", "R003"],
+            "Report #": ["R001", "R002", "R003"],
             "LAB": ["GIA", "IGI", "HRD"],
             "COMPANY COMMENT": ["Good quality", "Premium", "Rare cut"],
             "IMAGE": ["img1.jpg", "img2.jpg", "img3.jpg"],
@@ -1641,7 +1645,7 @@ async def handle_text(message: types.Message):
                     msg = (
                         f"💎 {r['Weight']} ct | {r['Shape']} | {r['Color']} | {r['Clarity']}\n"
                         f"💰 ${r.get('Price Per Carat', 'N/A')} / ct\n"
-                        f"🏛 Lab: {r.get('Lab', 'N/A')} | 📦 {r.get('STOCK STATUS', 'N/A')}\n"
+                        f"🏛 Lab: {r.get('Lab') or r.get('LAB') or 'N/A'} | 📦 {r.get('STOCK STATUS', 'N/A')}\n"
                     )
 
                     await message.reply(msg)
@@ -1700,8 +1704,13 @@ async def handle_doc(message: types.Message):
             except:
                 continue
 
+            stock_row = stock_df[stock_df["Stock #"] == stone_id]
+
+            if stock_row.empty:
+                continue
+
             r = stock_row.iloc[0]
-            actual_price = float(r["Price Per Carat"])
+            actual_price = pd.to_numeric(r["Price Per Carat"], errors="coerce") or 0
             supplier = r["SUPPLIER"].replace("supplier_", "").lower()
 
             deal_id = f"DEAL-{uuid.uuid4().hex[:12]}"
@@ -1713,7 +1722,7 @@ async def handle_doc(message: types.Message):
                 "client_username": user["USERNAME"],
                 "actual_stock_price": actual_price,
                 "client_offer_price": offer_price,
-                "admin_profit_value": profit = round(offer_price - actual_price, 2)
+                "admin_profit_value": round(offer_price - actual_price, 2),
                 "supplier_action": "PENDING",
                 "admin_action": "PENDING",
                 "final_status": "OPEN",
@@ -1746,7 +1755,7 @@ async def handle_doc(message: types.Message):
                 continue
 
             df_excel = pd.DataFrame(rows)
-            excel_path = f"/tmp/{supplier}_bulk_deals.xlsx"
+            excel_path = f"/tmp/{supplier}_{int(time.time())}_bulk_deals.xlsx"
             df_excel.to_excel(excel_path, index=False)
 
             save_notification(
@@ -1771,7 +1780,11 @@ async def handle_doc(message: types.Message):
 
         df = pd.read_excel(path)
 
-        required_cols = ["Deal ID", "Admin Action (YES / NO)"]
+        required_cols = [
+            "Deal ID",
+            "Supplier Action (ACCEPT / REJECT)",
+            "Admin Action (YES / NO)"
+        ]
         for col in required_cols:
             if col not in df.columns:
                 await message.reply("❌ Invalid admin approval Excel format.")
