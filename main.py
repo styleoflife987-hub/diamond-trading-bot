@@ -1795,6 +1795,7 @@ async def handle_doc(message: types.Message):
             supplier_decision = str(
                 row["Supplier Action (ACCEPT / REJECT)"]
             ).strip().upper()
+
             admin_decision = str(
                 row["Admin Action (YES / NO)"]
             ).strip().upper()
@@ -1810,140 +1811,59 @@ async def handle_doc(message: types.Message):
                 )
             except:
                 continue
-                
-        # 🚫 Prevent editing closed deals
-        if deal.get("final_status") in ["COMPLETED", "CLOSED"]:
-            continue
-
-
-                # ---------------- SUPPLIER ACTION ----------------
-        if supplier_decision == "ACCEPT":
-            deal["supplier_action"] = "ACCEPTED"
-
-        elif supplier_decision == "REJECT":
-            deal["supplier_action"] = "REJECTED"
-            deal["admin_action"] = "REJECTED"
-            deal["final_status"] = "CLOSED"
-            unlock_stone(deal["stone_id"])
-
-
-        # ---------------- ADMIN ACTION ----------------
-        if admin_decision == "YES" and deal.get("supplier_action") == "ACCEPTED":
-            deal["admin_action"] = "APPROVED"
-            deal["final_status"] = "COMPLETED"
-
-            remove_stone_from_supplier_and_combined(
-                deal["stone_id"]
-            )
-
-            save_notification(
-                deal["client_username"],
-                "client",
-                f"🎉 Deal APPROVED for Stone {deal['stone_id']}"
-            )
-
-            save_notification(
-                deal["supplier_username"],
-                "supplier",
-                f"✅ Deal APPROVED for Stone {deal['stone_id']}"
-            )
-
-        elif admin_decision == "NO":
-            deal["admin_action"] = "REJECTED"
-            deal["final_status"] = "CLOSED"
-
-            save_notification(
-                deal["client_username"],
-                "client",
-                f"❌ Deal rejected by admin for Stone {deal['stone_id']}"
-            )
-
-            save_notification(
-                deal["supplier_username"],
-                "supplier",
-                f"❌ Deal rejected by admin for Stone {deal['stone_id']}"
-            )
-
-
-        # ==========================================================
-    # ✅ SUPPLIER DEAL APPROVAL EXCEL
-    # ==========================================================
-    if (
-        user["ROLE"] == "supplier"
-        and message.document.file_name.lower().endswith(".xlsx")
-    ):
-
-        file = await bot.get_file(message.document.file_id)
-        path = f"/tmp/{message.document.file_name}"
-        await bot.download_file(file.file_path, path)
-
-        df = pd.read_excel(path)
-
-        required_cols = [
-            "Deal ID",
-            "Supplier Action (ACCEPT / REJECT)"
-        ]
-        for col in required_cols:
-            if col not in df.columns:
-                await message.reply("❌ Invalid supplier approval Excel format.")
-                return
-
-        for _, row in df.iterrows():
-
-            deal_id = str(row["Deal ID"]).strip()
-            decision = str(
-                row["Supplier Action (ACCEPT / REJECT)"]
-            ).strip().upper()
-
-            if not deal_id.startswith("DEAL-"):
-                continue
-
-            key = f"{DEALS_FOLDER}{deal_id}.json"
-
-            try:
-                deal = json.loads(
-                    s3.get_object(
-                        Bucket=AWS_BUCKET,
-                        Key=key
-                    )["Body"].read()
-                )
-            except:
-                continue
-
-            # 🔐 Only supplier who owns the deal can update
-            if deal.get("supplier_username") != user["USERNAME"].lower():
-                continue
 
             # 🚫 Prevent editing closed deals
             if deal.get("final_status") in ["COMPLETED", "CLOSED"]:
                 continue
 
-            # ---------------- SUPPLIER DECISION ----------------
-            if decision == "ACCEPT":
+
+            # ---------------- SUPPLIER ACTION ----------------
+            if supplier_decision == "ACCEPT":
                 deal["supplier_action"] = "ACCEPTED"
 
-                save_notification(
-                    deal["client_username"],
-                    "client",
-                    f"✅ Supplier accepted deal for Stone {deal['stone_id']}"
-                )
-
-            elif decision == "REJECT":
+            elif supplier_decision == "REJECT":
                 deal["supplier_action"] = "REJECTED"
                 deal["admin_action"] = "REJECTED"
                 deal["final_status"] = "CLOSED"
-
-                # 🔓 Unlock stone
                 unlock_stone(deal["stone_id"])
+
+
+            # ---------------- ADMIN ACTION ----------------
+            if admin_decision == "YES" and deal.get("supplier_action") == "ACCEPTED":
+                deal["admin_action"] = "APPROVED"
+                deal["final_status"] = "COMPLETED"
+
+                remove_stone_from_supplier_and_combined(
+                    deal["stone_id"]
+                )
+    
+                save_notification(
+                    deal["client_username"],
+                    "client",
+                    f"🎉 Deal APPROVED for Stone {deal['stone_id']}"
+                )
+
+                save_notification(
+                    deal["supplier_username"],
+                    "supplier",
+                    f"✅ Deal APPROVED for Stone {deal['stone_id']}"
+                )
+
+            elif admin_decision == "NO":
+                deal["admin_action"] = "REJECTED"
+                deal["final_status"] = "CLOSED"
 
                 save_notification(
                     deal["client_username"],
                     "client",
-                    f"❌ Supplier rejected deal for Stone {deal['stone_id']}"
+                    f"❌ Deal rejected by admin for Stone {deal['stone_id']}"
                 )
 
-            else:
-                continue
+                save_notification(
+                    deal["supplier_username"],
+                    "supplier",
+                    f"❌ Deal rejected by admin for Stone {deal['stone_id']}"
+                )
 
             # ---------------- SAVE DEAL ----------------
             log_deal_history(deal)
@@ -1955,22 +1875,101 @@ async def handle_doc(message: types.Message):
                 ContentType="application/json"
             )
 
-        await message.reply("✅ Supplier deal decisions processed successfully.")
-        return
+        await message.reply("✅ Admin deal decisions processed successfully.")
 
 
-            # ---------------- SAVE DEAL ----------------
-            log_deal_history(deal)
+# ==========================================================
+# ✅ SUPPLIER DEAL APPROVAL EXCEL
+# ==========================================================
+if (
+    user["ROLE"] == "supplier"
+    and message.document.file_name.lower().endswith(".xlsx")
+):
 
-            s3.put_object(
-                Bucket=AWS_BUCKET,
-                Key=key,
-                Body=json.dumps(deal, indent=2),
-                ContentType="application/json"
+    file = await bot.get_file(message.document.file_id)
+    path = f"/tmp/{message.document.file_name}"
+    await bot.download_file(file.file_path, path)
+
+    df = pd.read_excel(path)
+
+    required_cols = [
+        "Deal ID",
+        "Supplier Action (ACCEPT / REJECT)"
+    ]
+    for col in required_cols:
+        if col not in df.columns:
+            await message.reply("❌ Invalid supplier approval Excel format.")
+            return
+
+    for _, row in df.iterrows():
+
+        deal_id = str(row["Deal ID"]).strip()
+        decision = str(
+            row["Supplier Action (ACCEPT / REJECT)"]
+        ).strip().upper()
+
+        if not deal_id.startswith("DEAL-"):
+            continue
+
+        key = f"{DEALS_FOLDER}{deal_id}.json"
+
+        try:
+            deal = json.loads(
+                s3.get_object(
+                    Bucket=AWS_BUCKET,
+                    Key=key
+                )["Body"].read()
+            )
+        except:
+            continue
+
+        # 🔐 Only supplier who owns the deal can update
+        if deal.get("supplier_username") != user["USERNAME"].lower():
+            continue
+
+        # 🚫 Prevent editing closed deals
+        if deal.get("final_status") in ["COMPLETED", "CLOSED"]:
+            continue
+
+        # ---------------- SUPPLIER DECISION ----------------
+        if decision == "ACCEPT":
+            deal["supplier_action"] = "ACCEPTED"
+
+            save_notification(
+                deal["client_username"],
+                "client",
+                f"✅ Supplier accepted deal for Stone {deal['stone_id']}"
             )
 
-        await message.reply("✅ Admin deal approvals processed successfully.")
-        return
+        elif decision == "REJECT":
+            deal["supplier_action"] = "REJECTED"
+            deal["admin_action"] = "REJECTED"
+            deal["final_status"] = "CLOSED"
+
+            # 🔓 Unlock stone
+            unlock_stone(deal["stone_id"])
+
+            save_notification(
+                deal["client_username"],
+                "client",
+                f"❌ Supplier rejected deal for Stone {deal['stone_id']}"
+            )
+
+        else:
+            continue
+
+        # ---------------- SAVE DEAL ----------------
+        log_deal_history(deal)
+
+        s3.put_object(
+            Bucket=AWS_BUCKET,
+            Key=key,
+            Body=json.dumps(deal, indent=2),
+            ContentType="application/json"
+        )
+
+    await message.reply("✅ Supplier deal decisions processed successfully.")
+
 
     # ❗ FILE SIZE LIMIT (10 MB)
     if message.document.file_size > 10 * 1024 * 1024:
