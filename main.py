@@ -1878,58 +1878,58 @@ async def handle_doc(message: types.Message):
         await message.reply("✅ Admin deal decisions processed successfully.")
 
 
-# ==========================================================
-# ✅ SUPPLIER DEAL APPROVAL EXCEL
-# ==========================================================
-if (
-    user["ROLE"] == "supplier"
-    and message.document.file_name.lower().endswith(".xlsx")
-):
+    # ==========================================================
+    # ✅ SUPPLIER DEAL APPROVAL EXCEL
+    # ==========================================================
+    if (
+        user["ROLE"] == "supplier"
+        and message.document.file_name.lower().endswith(".xlsx")
+    ):
 
-    file = await bot.get_file(message.document.file_id)
-    path = f"/tmp/{message.document.file_name}"
-    await bot.download_file(file.file_path, path)
+        file = await bot.get_file(message.document.file_id)
+        path = f"/tmp/{message.document.file_name}"
+        await bot.download_file(file.file_path, path)
 
-    df = pd.read_excel(path)
+        df = pd.read_excel(path)
 
-    required_cols = [
-        "Deal ID",
-        "Supplier Action (ACCEPT / REJECT)"
-    ]
-    for col in required_cols:
-        if col not in df.columns:
-            await message.reply("❌ Invalid supplier approval Excel format.")
-            return
+        required_cols = [
+            "Deal ID",
+            "Supplier Action (ACCEPT / REJECT)"
+        ]
+        for col in required_cols:
+            if col not in df.columns:
+                await message.reply("❌ Invalid supplier approval Excel format.")
+                return
 
-    for _, row in df.iterrows():
+        for _, row in df.iterrows():
 
-        deal_id = str(row["Deal ID"]).strip()
-        decision = str(
-            row["Supplier Action (ACCEPT / REJECT)"]
-        ).strip().upper()
+            deal_id = str(row["Deal ID"]).strip()
+            decision = str(
+                row["Supplier Action (ACCEPT / REJECT)"]
+            ).strip().upper()
 
-        if not deal_id.startswith("DEAL-"):
-            continue
+            if not deal_id.startswith("DEAL-"):
+                continue
 
-        key = f"{DEALS_FOLDER}{deal_id}.json"
+            key = f"{DEALS_FOLDER}{deal_id}.json"
 
-        try:
-            deal = json.loads(
-                s3.get_object(
-                    Bucket=AWS_BUCKET,
-                    Key=key
-                )["Body"].read()
-            )
-        except:
-            continue
+            try:
+                deal = json.loads(
+                    s3.get_object(
+                        Bucket=AWS_BUCKET,
+                        Key=key
+                    )["Body"].read()
+                )
+            except:
+                continue
 
-        # 🔐 Only supplier who owns the deal can update
-        if deal.get("supplier_username") != user["USERNAME"].lower():
-            continue
+            # 🔐 Only supplier who owns the deal can update
+            if deal.get("supplier_username") != user["USERNAME"].lower():
+                continue
 
-        # 🚫 Prevent editing closed deals
-        if deal.get("final_status") in ["COMPLETED", "CLOSED"]:
-            continue
+            # 🚫 Prevent editing closed deals
+            if deal.get("final_status") in ["COMPLETED", "CLOSED"]:
+                continue
 
         # ---------------- SUPPLIER DECISION ----------------
         if decision == "ACCEPT":
