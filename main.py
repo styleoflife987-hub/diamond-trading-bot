@@ -165,21 +165,24 @@ def log_deal_history(deal):
 
 
 
-    df = pd.concat([
-        df,
-        pd.DataFrame([{
-            "Deal ID": deal.get("deal_id"),
-            "Stone ID": deal.get("stone_id"),
-            "Supplier": deal.get("supplier_username"),
-            "Client": deal.get("client_username"),
-            "Actual Price": deal.get("actual_stock_price"),
-            "Offer Price": deal.get("client_offer_price"),
-            "Supplier Action": deal.get("supplier_action"),
-            "Admin Action": deal.get("admin_action"),
-            "Final Status": deal.get("final_status"),
-            "Created At": deal.get("created_at"),
-        }])
-     , ignore_index=True)
+        df = pd.concat(
+            [
+                df,
+                pd.DataFrame([{
+                    "Deal ID": deal.get("deal_id"),
+                    "Stone ID": deal.get("stone_id"),
+                    "Supplier": deal.get("supplier_username"),
+                    "Client": deal.get("client_username"),
+                    "Actual Price": deal.get("actual_stock_price"),
+                    "Offer Price": deal.get("client_offer_price"),
+                    "Supplier Action": deal.get("supplier_action"),
+                    "Admin Action": deal.get("admin_action"),
+                    "Final Status": deal.get("final_status"),
+                    "Created At": deal.get("created_at"),
+                }])
+            ],
+            ignore_index=True
+        )
 
     df.to_excel("/tmp/deal_history.xlsx", index=False)
     s3.upload_file("/tmp/deal_history.xlsx", AWS_BUCKET, DEAL_HISTORY_KEY)
