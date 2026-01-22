@@ -1901,6 +1901,8 @@ async def handle_doc(message: types.Message):
                 await message.reply("❌ Invalid supplier approval Excel format.")
                 return
 
+        processed = 0
+
         for _, row in df.iterrows():
 
             deal_id = str(row["Deal ID"]).strip()
@@ -1931,44 +1933,46 @@ async def handle_doc(message: types.Message):
             if deal.get("final_status") in ["COMPLETED", "CLOSED"]:
                 continue
 
-        # ---------------- SUPPLIER DECISION ----------------
-        if decision == "ACCEPT":
-            deal["supplier_action"] = "ACCEPTED"
+            # ---------------- SUPPLIER DECISION ----------------
+            if decision == "ACCEPT":
+                deal["supplier_action"] = "ACCEPTED"
 
-            save_notification(
-                deal["client_username"],
-                "client",
-                f"✅ Supplier accepted deal for Stone {deal['stone_id']}"
+                save_notification(
+                    deal["client_username"],
+                    "client",
+                    f"✅ Supplier accepted deal for Stone {deal['stone_id']}"
+                )
+
+            elif decision == "REJECT":
+                deal["supplier_action"] = "REJECTED"
+                deal["admin_action"] = "REJECTED"
+                deal["final_status"] = "CLOSED"
+
+                # 🔓 Unlock stone
+                unlock_stone(deal["stone_id"])
+
+                save_notification(
+                    deal["client_username"],
+                    "client",
+                    f"❌ Supplier rejected deal for Stone {deal['stone_id']}"
+                )
+            else:
+                continue
+
+            # ---------------- SAVE DEAL ----------------
+            log_deal_history(deal)
+
+            s3.put_object(
+                Bucket=AWS_BUCKET,
+                Key=key,
+                Body=json.dumps(deal, indent=2),
+                ContentType="application/json"
             )
 
-        elif decision == "REJECT":
-            deal["supplier_action"] = "REJECTED"
-            deal["admin_action"] = "REJECTED"
-            deal["final_status"] = "CLOSED"
+            processed += 1
 
-            # 🔓 Unlock stone
-            unlock_stone(deal["stone_id"])
-
-            save_notification(
-                deal["client_username"],
-                "client",
-                f"❌ Supplier rejected deal for Stone {deal['stone_id']}"
-            )
-
-        else:
-            continue
-
-        # ---------------- SAVE DEAL ----------------
-        log_deal_history(deal)
-
-        s3.put_object(
-            Bucket=AWS_BUCKET,
-            Key=key,
-            Body=json.dumps(deal, indent=2),
-            ContentType="application/json"
-        )
-
-    await message.reply("✅ Supplier deal decisions processed successfully.")
+        await message.reply(f"✅ Supplier deal decisions processed successfully. ({processed} deals)")
+        return   # ✅ IMPORTANT: stop further processing
 
 
     # ❗ FILE SIZE LIMIT (10 MB)
