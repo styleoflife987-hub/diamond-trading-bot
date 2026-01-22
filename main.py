@@ -410,6 +410,70 @@ async def login(message: types.Message):
     user_state[message.from_user.id] = {"step": "login_username"}
     await message.reply("Enter Username:")
 
+# ---------------- ACCOUNT FLOW HANDLER ----------------
+
+@dp.message()
+async def account_flow_handler(message: types.Message):
+    uid = message.from_user.id
+
+    # Ignore commands
+    if message.text.startswith("/"):
+        return
+
+    if uid not in user_state:
+        return
+
+    step = user_state[uid].get("step")
+    text = message.text.strip()
+
+    # -------- CREATE ACCOUNT FLOW --------
+    if step == "username":
+        if len(text) < 3:
+            await message.reply("❌ Username must be at least 3 characters.")
+            return
+
+        user_state[uid]["username"] = text.lower()
+        user_state[uid]["step"] = "password"
+
+        await message.reply("🔐 Enter Password:")
+        return
+
+    if step == "password":
+        if len(text) < 4:
+            await message.reply("❌ Password must be at least 4 characters.")
+            return
+
+        username = user_state[uid]["username"]
+        password = text
+
+        df = load_accounts()
+
+        # Prevent duplicate user
+        if not df[df["USERNAME"] == username].empty:
+            await message.reply("❌ Username already exists.")
+            user_state.pop(uid, None)
+            return
+
+        # Default role = client (you can change)
+        new_row = {
+            "USERNAME": username,
+            "PASSWORD": password,
+            "ROLE": "client",
+            "APPROVED": "NO"
+        }
+
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        save_accounts(df)
+
+        user_state.pop(uid, None)
+
+        await message.reply(
+            "✅ Account created successfully!\n"
+            "⏳ Wait for admin approval.\n"
+            "Use /login after approval."
+        )
+        return
+
 # ---------------- LOGOUT ----------------
 
 @dp.message(Command("logout"))
