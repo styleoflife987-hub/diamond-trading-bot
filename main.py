@@ -1369,16 +1369,44 @@ async def handle_text(message: types.Message):
         if state["step"] == "login_password":
             df = load_accounts()
             r = df[(df["USERNAME"] == state["username"]) & (df["PASSWORD"] == message.text)]
-
+            
             if r.empty:
                 await message.reply("❌ Login failed. Invalid username or password.")
                 user_state.pop(uid)
                 return
-
+            
             if r.iloc[0]["APPROVED"] != "YES":
                 await message.reply("❌ Your account is not approved yet.")
                 user_state.pop(uid)
                 return
+
+            # ---------------- FIX FOR PRINCE ----------------
+            role = r.iloc[0]["ROLE"]
+            if r.iloc[0]["USERNAME"].lower() == "prince":
+                role = "admin"  # Force Prince to be admin
+            # -----------------------------------------------
+
+            # Save logged in Telegram ID
+            logged_in_users[uid] = {
+                "USERNAME": r.iloc[0]["USERNAME"],
+                "ROLE": role  # Make sure we save the corrected role
+            }
+
+            # Assign keyboard
+            if role == "admin":
+                kb = admin_kb
+            elif role == "client":
+                kb = client_kb
+            elif role == "supplier":
+                kb = supplier_kb
+            else:
+                kb = types.ReplyKeyboardRemove()
+
+            await message.reply(
+                f"✅ Login successful. You are logged in as: {role.capitalize()}",
+                reply_markup=kb
+            )
+            user_state.pop(uid, None)
 
             # ---------------- FIX FOR PRINCE ----------------
             role = r.iloc[0]["ROLE"]
