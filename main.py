@@ -406,9 +406,15 @@ async def create_account(message: types.Message):
     await message.reply("Enter Username:")
 
 @dp.message(Command("login"))
-async def login(message: types.Message):
-    user_state[message.from_user.id] = {"step": "login_username"}
-    await message.reply("Enter Username:")
+async def login_cmd(message: types.Message):
+    uid = message.from_user.id
+
+    # ✅ Reset any previous state
+    user_state[uid] = {
+        "step": "login_username"
+    }
+
+    await message.reply("👤 Enter Username:")
 
 # ---------------- ACCOUNT FLOW HANDLER ----------------
 
