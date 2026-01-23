@@ -1472,8 +1472,8 @@ async def handle_text(message: types.Message):
             )
 
             if notifications:
-                    note_msg = "🔔 Notifications\n\n"
-                    for n in notifications:
+                note_msg = "🔔 Notifications\n\n"
+                for n in notifications:
                     note_msg += f"{n['message']}\n🕒 {n['time']}\n\n"
                 await message.reply(note_msg)
 
