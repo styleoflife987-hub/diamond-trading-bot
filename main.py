@@ -1360,6 +1360,8 @@ async def handle_text(message: types.Message):
 
 
         # -------- LOGIN FLOW --------
+        step = state.get("step")
+
         if step == "login_username":
             user_state[uid]["username"] = text.lower()
             user_state[uid]["step"] = "login_password"
@@ -1428,6 +1430,7 @@ async def handle_text(message: types.Message):
                 note_msg = "🔔 Notifications\n\n"
                 for n in notifications:
                     note_msg += f"{n['message']}\n🕒 {n['time']}\n\n"
+                    
                 await message.reply(note_msg)
 
             user_state.pop(uid, None)
