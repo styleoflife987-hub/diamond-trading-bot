@@ -1359,116 +1359,80 @@ async def handle_text(message: types.Message):
             return
 
 
-        # ---- LOGIN FLOW ----
-        if state["step"] == "login_username":
-            state["username"] = message.text.strip()
-            state["step"] = "login_password"
-            await message.reply("Enter Password:")
+        # -------- LOGIN FLOW --------
+        if step == "login_username":
+            user_state[uid]["username"] = text.lower()
+            user_state[uid]["step"] = "login_password"
+            await message.reply("🔐 Enter Password:")
             return
 
-        if state["step"] == "login_password":
+        if step == "login_password":
+            username = user_state[uid]["username"]
+            password = text
+
             df = load_accounts()
-            r = df[(df["USERNAME"] == state["username"]) & (df["PASSWORD"] == message.text)]
-            
+            r = df[
+                (df["USERNAME"] == username) &
+                (df["PASSWORD"] == password)
+            ]
+
             if r.empty:
-                await message.reply("❌ Login failed. Invalid username or password.")
-                user_state.pop(uid)
+                await message.reply("❌ Invalid username or password")
+                user_state.pop(uid, None)
                 return
-            
+
             if r.iloc[0]["APPROVED"] != "YES":
-                await message.reply("❌ Your account is not approved yet.")
-                user_state.pop(uid)
+                await message.reply("⏳ Your account is not approved yet")
+                user_state.pop(uid, None)
                 return
 
             # ---------------- FIX FOR PRINCE ----------------
             role = r.iloc[0]["ROLE"]
-            if r.iloc[0]["USERNAME"].lower() == "prince":
-                role = "admin"  # Force Prince to be admin
-            # -----------------------------------------------
-
-            # Save logged in Telegram ID
-            logged_in_users[uid] = {
-                "USERNAME": r.iloc[0]["USERNAME"],
-                "ROLE": role  # Make sure we save the corrected role
-            }
-
-            # Assign keyboard
-            if role == "admin":
-                kb = admin_kb
-            elif role == "client":
-                kb = client_kb
-            elif role == "supplier":
-                kb = supplier_kb
-            else:
-                kb = types.ReplyKeyboardRemove()
-
-            await message.reply(
-                f"✅ Login successful. You are logged in as: {role.capitalize()}",
-                reply_markup=kb
-            )
-            user_state.pop(uid, None)
-
-            # ---------------- FIX FOR PRINCE ----------------
-            role = r.iloc[0]["ROLE"]
-            if r.iloc[0]["USERNAME"].lower() == "prince":
+            if username == "prince":
                 role = "admin"
             # -----------------------------------------------
 
-            # Save logged in Telegram ID
             logged_in_users[uid] = {
-                "USERNAME": r.iloc[0]["USERNAME"],
+                "USERNAME": username,
                 "ROLE": role,
-                "SUPPLIER_KEY": f"supplier_{r.iloc[0]['USERNAME'].lower()}" if role == "supplier" else None,
+                "SUPPLIER_KEY": f"supplier_{username}" if role == "supplier" else None,
             }
 
             save_sessions()
+            log_activity(logged_in_users[uid], "LOGIN")
 
-            log_activity(
-                logged_in_users[uid],
-                "LOGIN"
-            )
-
-            # Assign keyboard
             if role == "admin":
                 kb = admin_kb
-            elif role == "client":
-                kb = client_kb
             elif role == "supplier":
                 kb = supplier_kb
+            elif role == "client":
+                kb = client_kb
             else:
                 kb = types.ReplyKeyboardRemove()
 
-            username = r.iloc[0]["USERNAME"].capitalize()
+            uname = username.capitalize()
 
             if role == "admin":
-                welcome_msg = f"👑 Welcome back, Admin {username} — command, control, excellence."
+                welcome_msg = f"👑 Welcome back, Admin {uname}"
             elif role == "supplier":
-                welcome_msg = f"💎 Welcome, Supplier {username} — your brilliance drives the market."
+                welcome_msg = f"💎 Welcome, Supplier {uname}"
             elif role == "client":
-                welcome_msg = f"🥂 Welcome, {username} — discover diamonds beyond ordinary."
+                welcome_msg = f"🥂 Welcome, {uname}"
             else:
-                welcome_msg = f"Welcome, {username}."
+                welcome_msg = f"Welcome, {uname}"
 
-            await message.reply(
-                welcome_msg,
-                reply_markup=kb
-            )
+            await message.reply(welcome_msg, reply_markup=kb)
 
-            # 🔔 SHOW SAVED NOTIFICATIONS
-            notifications = fetch_unread_notifications(
-                logged_in_users[uid]["USERNAME"],
-                logged_in_users[uid]["ROLE"]
-            )
-
+            notifications = fetch_unread_notifications(username, role)
             if notifications:
                 note_msg = "🔔 Notifications\n\n"
                 for n in notifications:
                     note_msg += f"{n['message']}\n🕒 {n['time']}\n\n"
                 await message.reply(note_msg)
 
-            # ✅ Clear login state only once
             user_state.pop(uid, None)
             return
+
 
 
     # -------- BUTTON HANDLING --------
