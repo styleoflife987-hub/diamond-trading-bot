@@ -1237,7 +1237,7 @@ async def request_deal_start(message: types.Message):
 
 # ---------------- TEXT HANDLER ----------------
 
-@dp.message(F.text)
+@dp.message(F.text & ~F.text.startswith("🤝"))
 async def handle_text(message: types.Message):
     uid = message.from_user.id
     text = message.text.strip()
@@ -1275,7 +1275,7 @@ async def handle_text(message: types.Message):
                 return
 
             role = r.iloc[0]["ROLE"]
-            if username == "prince":
+            if username.lower() == "prince":
                 role = "admin"
 
             logged_in_users[uid] = {
