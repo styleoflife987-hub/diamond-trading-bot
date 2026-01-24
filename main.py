@@ -9,12 +9,26 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
+from fastapi import FastAPI
+import uvicorn
+import threading
 import os
 import json
 import pytz
 import uuid
 import time
 
+# ---------------- FASTAPI SERVER ----------------
+
+app = FastAPI()
+
+@app.get("/")
+def home():
+    return {"status": "ok"}
+
+@app.get("/diamonds")
+def diamonds():
+    return {"message": "Supplier API integration coming soon 💎"}
 
 
 # ---------------- CONFIG ----------------
@@ -2204,25 +2218,10 @@ async def handle_doc(message: types.Message):
 
 # ---------------- BOT STARTER ----------------
 
-def start_bot():
-    import asyncio
-    import nest_asyncio
-
-    nest_asyncio.apply()
-
-    async def runner():
-        print("💎 Bot is starting...")
-        load_sessions()
-        await dp.start_polling(bot, handle_signals=False)
-
-    asyncio.run(runner())
-
 def run_bot_thread():
+    import threading
     t = threading.Thread(target=start_bot)
     t.start()
 
 if __name__ == "__main__":
-    run_bot_thread()   # Bot background માં ચાલશે
-
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    run_bot_thread()   # Bot background માં ચાલશે)
