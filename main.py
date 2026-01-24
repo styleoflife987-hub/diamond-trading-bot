@@ -2205,3 +2205,8 @@ def start_bot():
         await dp.start_polling(bot, handle_signals=False)
 
     asyncio.run(runner())
+
+
+# ✅ ADD THIS
+if __name__ == "__main__":
+    start_bot()
