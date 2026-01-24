@@ -1237,7 +1237,7 @@ async def request_deal_start(message: types.Message):
 
 # ---------------- TEXT HANDLER ----------------
 
-@dp.message(F.text & ~F.text.startswith("🤝"))
+@dp.message()
 async def handle_text(message: types.Message):
     uid = message.from_user.id
     text = message.text.strip()
