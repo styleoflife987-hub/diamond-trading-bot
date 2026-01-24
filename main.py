@@ -2217,7 +2217,12 @@ def start_bot():
 
     asyncio.run(runner())
 
+def run_bot_thread():
+    t = threading.Thread(target=start_bot)
+    t.start()
 
-# ✅ ADD THIS
 if __name__ == "__main__":
-    start_bot()
+    run_bot_thread()   # Bot background માં ચાલશે
+
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
