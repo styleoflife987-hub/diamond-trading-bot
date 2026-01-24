@@ -1255,40 +1255,42 @@ async def handle_text(message: types.Message):
         step = state.get("step")
 
         # ================= LOGIN FLOW (TOP PRIORITY) =================
+
         if step == "login_username":
-            user_state[uid]["username"] = text.lower()
+            user_state[uid]["username"] = text.strip().lower()
             user_state[uid]["step"] = "login_password"
+
             await message.reply("🔐 Enter Password:")
             return
 
-        if step == "login_password":
-            username = user_state[uid]["username"]
-            password = text
+
+        elif step == "login_password":
+            username = user_state[uid].get("username", "").lower()
+            password = text.strip()
 
             df = load_accounts()
 
-            # ✅ normalize for safe compare
+            # ✅ normalize excel data
             df["USERNAME"] = df["USERNAME"].astype(str).str.lower().str.strip()
             df["PASSWORD"] = df["PASSWORD"].astype(str).str.strip()
 
             r = df[
-                (df["USERNAME"] == username.lower()) &
-                (df["PASSWORD"] == password.strip())
+                (df["USERNAME"] == username) &
+                (df["PASSWORD"] == password)
             ]
-
 
             if r.empty:
                 await message.reply("❌ Invalid username or password")
                 user_state.pop(uid, None)
                 return
 
-            if r.iloc[0]["APPROVED"] != "YES":
+            if str(r.iloc[0]["APPROVED"]).upper() != "YES":
                 await message.reply("⏳ Your account is not approved yet")
                 user_state.pop(uid, None)
                 return
 
             role = r.iloc[0]["ROLE"]
-            if username.lower() == "prince":
+            if username == "prince":
                 role = "admin"
 
             logged_in_users[uid] = {
@@ -1300,6 +1302,7 @@ async def handle_text(message: types.Message):
             save_sessions()
             log_activity(logged_in_users[uid], "LOGIN")
 
+            # ✅ DEBUG
             print("✅ Logged in:", logged_in_users)
 
             if role == "admin":
@@ -1311,18 +1314,11 @@ async def handle_text(message: types.Message):
             else:
                 kb = types.ReplyKeyboardRemove()
 
-            uname = username.capitalize()
-            await message.reply(f"✅ Welcome {uname}", reply_markup=kb)
-
-            notifications = fetch_unread_notifications(username, role)
-            if notifications:
-                note_msg = "🔔 Notifications\n\n"
-                for n in notifications:
-                    note_msg += f"{n['message']}\n🕒 {n['time']}\n\n"
-                await message.reply(note_msg)
+            await message.reply(f"✅ Welcome {username.capitalize()}", reply_markup=kb)
 
             user_state.pop(uid, None)
             return
+
 
         # ---------- DEAL REQUEST FLOW ----------
         if step == "deal_stone":
