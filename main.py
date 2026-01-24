@@ -11,7 +11,6 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from fastapi import FastAPI
 import uvicorn
-import threading
 import os
 import json
 import pytz
@@ -2230,11 +2229,10 @@ async def handle_doc(message: types.Message):
 @app.on_event("startup")
 async def startup_event():
     import asyncio
-    import threading
+    print("🤖 Telegram Bot starting...")
 
-    def start_bot():
-        print("🤖 Telegram Bot starting...")
-        asyncio.run(dp.start_polling(bot, handle_signals=False))
+    # Clean any old webhook / conflict
+    await bot.delete_webhook(drop_pending_updates=True)
 
-    t = threading.Thread(target=start_bot, daemon=True)
-    t.start()
+    # Start polling safely in same event loop
+    asyncio.create_task(dp.start_polling(bot))
