@@ -2216,12 +2216,16 @@ async def handle_doc(message: types.Message):
 
     await message.reply(summary_msg)
 
-# ---------------- BOT STARTER ----------------
+# ---------------- START BOT ON SERVER START ----------------
 
-def run_bot_thread():
+@app.on_event("startup")
+async def startup_event():
+    import asyncio
     import threading
-    t = threading.Thread(target=start_bot)
-    t.start()
 
-if __name__ == "__main__":
-    run_bot_thread()   # Bot background માં ચાલશે)
+    def start_bot():
+        print("🤖 Telegram Bot starting...")
+        asyncio.run(dp.start_polling(bot, handle_signals=False))
+
+    t = threading.Thread(target=start_bot, daemon=True)
+    t.start()
