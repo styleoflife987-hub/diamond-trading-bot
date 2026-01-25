@@ -1665,6 +1665,7 @@ async def handle_text(message: types.Message):
 
             # ---------------- FORMAT OUTPUT ----------------
             shape_summary = ", ".join(
+
                 f"{k.capitalize()}:{v}" for k, v in df["Shape"].value_counts().items()
             )
 
