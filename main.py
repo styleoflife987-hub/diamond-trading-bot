@@ -425,8 +425,8 @@ async def login(message: types.Message):
 
 # ---------------- ACCOUNT FLOW HANDLER ----------------
 
-@dp.message()
-async def account_flow_handler(message: types.Message):
+# @dp.message()
+# async def account_flow_handler(message: types.Message):
     uid = message.from_user.id
 
     # Ignore commands
