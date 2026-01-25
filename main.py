@@ -1255,13 +1255,17 @@ async def start_login(message: types.Message):
 @dp.message()
 async def handle_text(message: types.Message):
     uid = message.from_user.id
+
+    # ✅ Safety: ignore non-text messages
+    if not message.text:
+        return
+
     text = message.text.strip()
 
+    # 🚫 Ignore commands so they don't break state flow
     if text.startswith("/"):
         return
 
-    # ✅ LOAD USER STATE
-    state = user_state.get(uid)
 
     # ================= LOGIN FLOW =================
     if state and state.get("step") == "login_username":
