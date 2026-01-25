@@ -56,6 +56,13 @@ NOTIFICATIONS_FOLDER = "notifications/"
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+import asyncio
+
+async def clear_webhook():
+    await bot.delete_webhook(drop_pending_updates=True)
+    print("✅ Webhook cleared")
+
+asyncio.create_task(clear_webhook())
 # ---------------- AWS ----------------
 
 s3 = boto3.client(
