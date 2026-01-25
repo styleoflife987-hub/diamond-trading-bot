@@ -1196,6 +1196,7 @@ async def view_deals(message: types.Message):
             types.FSInputFile(path),
             caption="📊 Pending Deals for Admin Approval"
         )
+        return
 
 # ---------------- START DEAL REQUEST ----------------
 
@@ -1340,9 +1341,10 @@ async def handle_text(message: types.Message):
         user_state.pop(uid, None)
         return
 
+    # ================= DEAL REQUEST FLOW =================
+    if state and state.get("step") in ["deal_stone", "deal_price"]:
+        step = state.get("step")
 
-
-        # ---------- DEAL REQUEST FLOW ----------
         if step == "deal_stone":
             state["stone_id"] = text
             state["step"] = "deal_price"
@@ -1442,20 +1444,9 @@ async def handle_text(message: types.Message):
                 f"⏳ Waiting for supplier response."
             )
 
+            # ✅ Clear deal state AFTER completion
             user_state.pop(uid, None)
             return
-
-            # Confirmation message
-            await message.reply(
-                f"✅ Deal request sent successfully!\n\n"
-                f"💎 Stone ID: {stone_id}\n"
-                f"💰 Your Offer: ${offer_price} / ct\n"
-                f"⏳ Waiting for supplier response."
-            )
-
-            user_state.pop(uid, None)
-            if not user:
-                return
 
     # -------- BUTTON HANDLING --------
     user = get_logged_user(uid)
@@ -1672,7 +1663,7 @@ async def handle_text(message: types.Message):
                 user_state.pop(uid)
                 return
 
-# ---------------- FORMAT OUTPUT ----------------
+            # ---------------- FORMAT OUTPUT ----------------
             shape_summary = ", ".join(
                 f"{k.capitalize()}:{v}" for k, v in df["Shape"].value_counts().items()
             )
@@ -2128,8 +2119,8 @@ async def handle_doc(message: types.Message):
     df["Price Per Carat"] = pd.to_numeric(df["Price Per Carat"], errors="coerce")
 
     if (df["Weight"] <= 0).any():
-       await message.reply("❌ Weight must be greater than 0")
-       return
+        await message.reply("❌ Weight must be greater than 0")
+        return
 
     if "Price Per Carat" in df.columns and (df["Price Per Carat"] <= 0).any():
         await message.reply("❌ Price must be greater than 0")
