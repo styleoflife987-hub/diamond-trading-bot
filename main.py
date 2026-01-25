@@ -1257,7 +1257,9 @@ async def request_deal_start(message: types.Message):
 
     out = "/tmp/request_deal_bulk.xlsx"
 
-    bulk_df = bulk_df.applymap(safe_excel)
+    for col in bulk_df.select_dtypes(include="object"):
+        bulk_df[col] = bulk_df[col].map(safe_excel)
+
     bulk_df.to_excel(out, index=False)
 
     await message.reply_document(
@@ -1468,9 +1470,7 @@ async def handle_text(message: types.Message):
                 "supplier_action": "PENDING",
                 "admin_action": "PENDING",
                 "final_status": "OPEN",
-                "created_at": datetime.now(
-                    pytz.timezone("Asia/Kolkata")
-                ).strftime("%Y-%m-%d %H:%M"),
+                "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M"),
             }
 
             s3.put_object(
@@ -1831,11 +1831,8 @@ async def handle_doc(message: types.Message):
         and user_state.get(uid, {}).get("step") == "bulk_deal_excel"
     ):
         file = await bot.get_file(message.document.file_id)
-        try:
-            df = pd.read_excel(path)
-        except Exception:
-            await message.reply("❌ Invalid Excel file.")
-            return
+        path = f"/tmp/{uid}_{int(time.time())}_{message.document.file_name}"
+
         await bot.download_file(file.file_path, path)
 
         try:
@@ -1843,6 +1840,8 @@ async def handle_doc(message: types.Message):
         except Exception:
             await message.reply("❌ Invalid Excel file.")
             return
+
+
         stock_df = load_stock()
 
         supplier_rows = {}
@@ -1855,6 +1854,9 @@ async def handle_doc(message: types.Message):
 
             stone_id = str(row["Stock #"]).strip()
 
+            if not stone_id:
+                continue
+
             # ✅ Prevent duplicate stone in same Excel upload
             if stone_id in processed_stones:
                 continue
@@ -1865,15 +1867,7 @@ async def handle_doc(message: types.Message):
             except:
                 continue
 
-            try:
-                offer_price = float(row["Offer Price ($/ct)"])
-                if offer_price <= 0:
-                    continue
-            except:
-                continue
-
             if "LOCKED" in stock_df.columns:
-                fresh_stock = load_stock()
                 fresh_stock = load_stock()
 
                 stock_row = fresh_stock.loc[
@@ -1900,7 +1894,7 @@ async def handle_doc(message: types.Message):
             if pd.isna(actual_price):
                 actual_price = 0
 
-            supplier = r["SUPPLIER"].replace("supplier_", "").lower()
+            supplier = str(r.get("SUPPLIER","")).replace("supplier_", "").lower()
 
             deal_id = f"DEAL-{uuid.uuid4().hex[:12]}"
 
@@ -1916,9 +1910,7 @@ async def handle_doc(message: types.Message):
                 "admin_action": "PENDING",
                 "final_status": "OPEN",
 
-                "created_at": datetime.now(
-                    pytz.timezone("Asia/Kolkata")
-                ).strftime("%Y-%m-%d %H:%M"),
+                "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M"),
             }
 
             s3.put_object(
@@ -1953,20 +1945,19 @@ async def handle_doc(message: types.Message):
             df_excel = pd.DataFrame(rows)
             excel_path = f"/tmp/{supplier}_{int(time.time())}_bulk_deals.xlsx"
 
-            df_excel = df_excel.applymap(safe_excel) 
+            for col in df_excel.select_dtypes(include="object"):
+                df_excel[col] = df_excel[col].map(safe_excel)
             df_excel.to_excel(excel_path, index=False)
 
             supplier_user = get_user_by_username(supplier) 
 
             if supplier_user:
-            await bot.send_document(
-                chat_id=user["TELEGRAM_ID"],   # or supplier chat id if available
                 with open(excel_path, "rb") as f:
                     await bot.send_document(
-                        chat_id=user["TELEGRAM_ID"],
+                        chat_id=supplier_user["TELEGRAM_ID"],
                         document=f
                     )
-            )
+
 
             if os.path.exists(excel_path):
                 os.remove(excel_path)
@@ -1979,10 +1970,11 @@ async def handle_doc(message: types.Message):
 
         await message.reply("✅ Bulk deal requests sent successfully.")
         user_state.pop(uid, None)
-        return
 
         if os.path.exists(path):
             os.remove(path)
+
+        return
 
 
     # ==========================================================
@@ -1992,7 +1984,8 @@ async def handle_doc(message: types.Message):
 
         file = await bot.get_file(message.document.file_id)
         try:
-            df = pd.read_excel(path)
+            path = f"/tmp/{uid}_{int(time.time())}_{message.document.file_name}"
+            await bot.download_file(file.file_path, path)
         except Exception:
             await message.reply("❌ Invalid Excel file.")
             return
@@ -2065,9 +2058,10 @@ async def handle_doc(message: types.Message):
                 deal["admin_action"] = "APPROVED"
                 deal["final_status"] = "COMPLETED"
 
-                remove_stone_from_supplier_and_combined(
-                    deal["stone_id"]
-                )
+                try:
+                    remove_stone_from_supplier_and_combined(deal["stone_id"])
+                except Exception as e:
+                    print("Remove stone failed:", e)
     
                 save_notification(
                     deal["client_username"],
@@ -2112,6 +2106,10 @@ async def handle_doc(message: types.Message):
             )
 
         await message.reply("✅ Admin deal decisions processed successfully.")
+
+        if os.path.exists(path):
+            os.remove(path)
+            
         return
 
     # ==========================================================
@@ -2224,12 +2222,16 @@ async def handle_doc(message: types.Message):
 
 
     file = await bot.get_file(message.document.file_id)
+    path = f"/tmp/{uid}_{int(time.time())}_{message.document.file_name}"
+
+    await bot.download_file(file.file_path, path)
+
     try:
         df = pd.read_excel(path)
     except Exception:
         await message.reply("❌ Invalid Excel file.")
         return
-    await bot.download_file(file.file_path, path)
+
 
     df = pd.read_excel(path)
 
@@ -2353,6 +2355,9 @@ async def handle_doc(message: types.Message):
     )
 
     await message.reply(summary_msg)
+
+    if os.path.exists(local_path):
+        os.remove(local_path)
 
 # ---------------- START BOT ON SERVER START ----------------
 
