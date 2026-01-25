@@ -1254,6 +1254,8 @@ async def request_deal_start(message: types.Message):
     )
 
     out = "/tmp/request_deal_bulk.xlsx"
+
+    bulk_df = bulk_df.applymap(safe_excel)
     bulk_df.to_excel(out, index=False)
 
     await message.reply_document(
@@ -1265,6 +1267,9 @@ async def request_deal_start(message: types.Message):
             "➡️ Upload the file back"
         )
     )
+    
+    if os.path.exists(out):
+        os.remove(out)
 
     user_state[message.from_user.id] = {"step": "bulk_deal_excel"}
 
@@ -1720,12 +1725,16 @@ async def handle_text(message: types.Message):
 
                 # 🔒 REMOVE SUPPLIER COLUMN FOR CLIENT VIEW ONLY
                 excel_df = df.drop(columns=["SUPPLIER"], errors="ignore")
+
+                excel_df = excel_df.applymap(safe_excel)
                 excel_df.to_excel(out, index=False)
 
                 await message.reply_document(
                     types.FSInputFile(out),
                     caption=f"💎 {len(df)} diamonds found\nShapes: {shape_summary}"
                 )
+                if os.path.exists(out):
+                    os.remove(out)
             else:
                 for _, r in df.iterrows():
                     msg = (
@@ -1899,7 +1908,12 @@ async def handle_doc(message: types.Message):
 
             df_excel = pd.DataFrame(rows)
             excel_path = f"/tmp/{supplier}_{int(time.time())}_bulk_deals.xlsx"
+
+            df_excel = df_excel.applymap(safe_excel) 
             df_excel.to_excel(excel_path, index=False)
+
+            if os.path.exists(excel_path):
+                os.remove(excel_path)
 
             save_notification(
                 supplier,
@@ -2209,6 +2223,7 @@ async def handle_doc(message: types.Message):
         df["LOCKED"] = df["Stock #"].map(locked_map).fillna(df["LOCKED"])
 
 
+    df = df.applymap(safe_excel)
     df.to_excel(local_path, index=False)
 
     s3.upload_file(
