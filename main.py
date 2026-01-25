@@ -1279,10 +1279,17 @@ async def handle_text(message: types.Message):
 
     if state and state.get("step") == "login_password":
         df = load_accounts()
+        username = state["username"].strip().lower()
+        password = text.strip()
+
+        df["USERNAME"] = df["USERNAME"].astype(str).str.strip().str.lower()
+        df["PASSWORD"] = df["PASSWORD"].astype(str).str.strip()
+
         r = df[
-            (df["USERNAME"] == state["username"]) &
-            (df["PASSWORD"].astype(str).str.strip() == text.strip())
+            (df["USERNAME"] == username) &
+            (df["PASSWORD"] == password)
         ]
+
 
         if r.empty:
             await message.reply("❌ Login failed. Invalid username or password.")
