@@ -17,6 +17,8 @@ import pytz
 import uuid
 import time
 
+IST = pytz.timezone("Asia/Kolkata")
+
 def safe_excel(val):
     if isinstance(val, str) and val.startswith(("=", "+", "-", "@")):
         return "'" + val
@@ -251,7 +253,7 @@ def save_notification(username, role, message):
         data = []
     data.append({
         "message": message,
-        "time": datetime.now(pytz.timezone("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M"),
+        "time": datetime.now(IST).strftime("%Y-%m-%d %H:%M"),
         "read": False
     })
     s3.put_object(
@@ -1171,7 +1173,9 @@ async def view_deals(message: types.Message):
         df = pd.DataFrame(rows)
         path = f"/tmp/{supplier}_deals.xlsx"
 
-        df = df.applymap(safe_excel)     # ✅ ADD THIS LINE
+        for col in df.select_dtypes(include="object"):
+            df[col] = df[col].map(safe_excel)
+
         df.to_excel(path, index=False)
 
         await message.reply_document(types.FSInputFile(path), caption="📊 Your Deals")
@@ -1210,16 +1214,14 @@ async def view_deals(message: types.Message):
         df = pd.DataFrame(rows)
         path = "/tmp/admin_pending_deals.xlsx"
 
-        df = df.applymap(safe_excel)     # ✅ ADD THIS LINE
-        df.to_excel(path, index=False)
-
-        await message.reply_document(
-            types.FSInputFile(path),
-            caption="📊 Pending Deals for Admin Approval"
-        )
-
-        if os.path.exists(path):  
-            os.remove(path)
+        for col in df.select_dtypes(include="object"):
+            df[col] = df[col].map(safe_excel)
+        try:
+            df.to_excel(path, index=False)
+            await message.reply_document(types.FSInputFile(path))
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
             
         return
 
@@ -1335,7 +1337,9 @@ async def handle_text(message: types.Message):
         role = str(r.iloc[0]["ROLE"]).strip().lower()
         
         # Force prince as admin (optional safety)
-        if r.iloc[0]["USERNAME"].strip().lower() == "prince":
+        ADMIN_USERS = os.getenv("ADMIN_USERS", "").lower().split(",")
+
+        if r.iloc[0]["USERNAME"].strip().lower() in ADMIN_USERS:
             role = "admin"
         # ------------------------------------------
 
@@ -1404,6 +1408,9 @@ async def handle_text(message: types.Message):
         if step == "deal_price":
             try:
                 offer_price = float(text)
+                if offer_price <= 0:
+                    await message.reply("❌ Price must be greater than zero.")
+                    return
             except:
                 await message.reply("❌ Enter a valid numeric price (e.g. 9500)")
                 return
@@ -1422,7 +1429,11 @@ async def handle_text(message: types.Message):
                 user_state.pop(uid, None)
                 return
 
-            row = df[df["Stock #"] == stone_id]
+            fresh_df = load_stock()
+            row = fresh_df[
+                (fresh_df["Stock #"] == stone_id) &
+                (fresh_df["LOCKED"] != "YES")
+            ]
             if row.empty:
                 await message.reply("❌ Stone not found.")
                 user_state.pop(uid, None)
@@ -1437,7 +1448,10 @@ async def handle_text(message: types.Message):
 
             deal_id = f"DEAL-{uuid.uuid4().hex[:10]}"
 
-            actual_price = pd.to_numeric(r["Price Per Carat"], errors="coerce")
+            actual_price = pd.to_numeric(
+                r.get("Price Per Carat", 0),
+                errors="coerce"
+            ) 
             if pd.isna(actual_price):
                 actual_price = 0
 
@@ -1769,7 +1783,8 @@ def lock_stone(stone_id: str):
 
     df.loc[df["Stock #"] == stone_id, "LOCKED"] = "YES"
     temp = "/tmp/all_suppliers_stock.xlsx"
-    df = df.applymap(safe_excel)
+    for col in df.select_dtypes(include="object"):
+        df[col] = df[col].map(safe_excel)
     df.to_excel(temp, index=False)
     s3.upload_file(temp, AWS_BUCKET, COMBINED_STOCK_KEY)
 
@@ -1781,7 +1796,8 @@ def unlock_stone(stone_id: str):
 
     df.loc[df["Stock #"] == stone_id, "LOCKED"] = "NO"
     temp = "/tmp/all_suppliers_stock.xlsx"
-    df = df.applymap(safe_excel)
+    for col in df.select_dtypes(include="object"):
+        df[col] = df[col].map(safe_excel)
     df.to_excel(temp, index=False)
     s3.upload_file(temp, AWS_BUCKET, COMBINED_STOCK_KEY)
 
@@ -1795,7 +1811,10 @@ async def handle_doc(message: types.Message):
     if message.document.file_size > 10 * 1024 * 1024:
         await message.reply("❌ File too large. Max allowed size is 10 MB.")
         return
-
+    allowed_ext = (".xls", ".xlsx")
+    if not message.document.file_name.lower().endswith(allowed_ext):
+        await message.reply("❌ Only Excel files allowed.")
+        return
     uid = message.from_user.id
     user = get_logged_user(uid)
 
@@ -1812,10 +1831,18 @@ async def handle_doc(message: types.Message):
         and user_state.get(uid, {}).get("step") == "bulk_deal_excel"
     ):
         file = await bot.get_file(message.document.file_id)
-        path = f"/tmp/{uid}_{int(time.time())}_{message.document.file_name}"
+        try:
+            df = pd.read_excel(path)
+        except Exception:
+            await message.reply("❌ Invalid Excel file.")
+            return
         await bot.download_file(file.file_path, path)
 
-        df = pd.read_excel(path)
+        try:
+            df = pd.read_excel(path)
+        except Exception:
+            await message.reply("❌ Invalid Excel file.")
+            return
         stock_df = load_stock()
 
         supplier_rows = {}
@@ -1838,12 +1865,26 @@ async def handle_doc(message: types.Message):
             except:
                 continue
 
+            try:
+                offer_price = float(row["Offer Price ($/ct)"])
+                if offer_price <= 0:
+                    continue
+            except:
+                continue
+
             if "LOCKED" in stock_df.columns:
                 fresh_stock = load_stock()
-                stock_row = fresh_stock[
-                    (fresh_stock["Stock #"] == stone_id) &
-                    (fresh_stock["LOCKED"] != "YES")
+                fresh_stock = load_stock()
+
+                stock_row = fresh_stock.loc[
+                    fresh_stock["Stock #"] == stone_id
                 ]
+
+                if stock_row.empty:
+                    continue
+
+                if stock_row.iloc[0].get("LOCKED") == "YES":
+                    continue
             else:
                 stock_row = stock_df[stock_df["Stock #"] == stone_id]
 
@@ -1852,7 +1893,10 @@ async def handle_doc(message: types.Message):
 
 
             r = stock_row.iloc[0]
-            actual_price = pd.to_numeric(r["Price Per Carat"], errors="coerce")
+            actual_price = pd.to_numeric(
+                r.get("Price Per Carat", 0),
+                errors="coerce"
+            ) 
             if pd.isna(actual_price):
                 actual_price = 0
 
@@ -1912,6 +1956,18 @@ async def handle_doc(message: types.Message):
             df_excel = df_excel.applymap(safe_excel) 
             df_excel.to_excel(excel_path, index=False)
 
+            supplier_user = get_user_by_username(supplier) 
+
+            if supplier_user:
+            await bot.send_document(
+                chat_id=user["TELEGRAM_ID"],   # or supplier chat id if available
+                with open(excel_path, "rb") as f:
+                    await bot.send_document(
+                        chat_id=user["TELEGRAM_ID"],
+                        document=f
+                    )
+            )
+
             if os.path.exists(excel_path):
                 os.remove(excel_path)
 
@@ -1925,6 +1981,9 @@ async def handle_doc(message: types.Message):
         user_state.pop(uid, None)
         return
 
+        if os.path.exists(path):
+            os.remove(path)
+
 
     # ==========================================================
     # ✅ ADMIN DEAL APPROVAL EXCEL (MUST BE BEFORE SUPPLIER CHECK)
@@ -1932,7 +1991,11 @@ async def handle_doc(message: types.Message):
     if user["ROLE"] == "admin" and message.document.file_name.lower().endswith(".xlsx"):
 
         file = await bot.get_file(message.document.file_id)
-        path = f"/tmp/{uid}_{int(time.time())}_{message.document.file_name}"
+        try:
+            df = pd.read_excel(path)
+        except Exception:
+            await message.reply("❌ Invalid Excel file.")
+            return
         await bot.download_file(file.file_path, path)
 
         df = pd.read_excel(path)
@@ -1966,6 +2029,9 @@ async def handle_doc(message: types.Message):
             admin_decision = str(
                 row.get("Admin Action (YES / NO)", "")
             ).strip().upper()
+
+            if admin_decision not in ["YES", "NO", ""]:
+                continue
 
             key = f"{DEALS_FOLDER}{deal_id}.json"
 
@@ -2057,7 +2123,11 @@ async def handle_doc(message: types.Message):
     ):
 
         file = await bot.get_file(message.document.file_id)
-        path = f"/tmp/{uid}_{int(time.time())}_{message.document.file_name}"
+        try:
+            df = pd.read_excel(path)
+        except Exception:
+            await message.reply("❌ Invalid Excel file.")
+            return
         await bot.download_file(file.file_path, path)
 
         df = pd.read_excel(path)
@@ -2154,7 +2224,11 @@ async def handle_doc(message: types.Message):
 
 
     file = await bot.get_file(message.document.file_id)
-    path = f"/tmp/{uid}_{int(time.time())}_{message.document.file_name}"
+    try:
+        df = pd.read_excel(path)
+    except Exception:
+        await message.reply("❌ Invalid Excel file.")
+        return
     await bot.download_file(file.file_path, path)
 
     df = pd.read_excel(path)
@@ -2223,7 +2297,8 @@ async def handle_doc(message: types.Message):
         df["LOCKED"] = df["Stock #"].map(locked_map).fillna(df["LOCKED"])
 
 
-    df = df.applymap(safe_excel)
+    for col in df.select_dtypes(include="object"):
+        df[col] = df[col].map(safe_excel)
     df.to_excel(local_path, index=False)
 
     s3.upload_file(
