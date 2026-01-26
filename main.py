@@ -1131,9 +1131,10 @@ async def view_deals(message: types.Message):
 
     for page in pages:
         for obj in page.get("Contents", []):
-            found_any = True
             if not obj["Key"].endswith(".json"):
                 continue
+
+            found_any = True
             try:
                 deal = json.loads(
                     s3.get_object(Bucket=AWS_BUCKET, Key=obj["Key"])["Body"].read()
@@ -1141,6 +1142,8 @@ async def view_deals(message: types.Message):
                 deals.append(deal)
             except Exception as e:
                 print("Deal load error:", e)
+
+    deals.sort(key=lambda d: d.get("created_at", ""), reverse=True)
 
     if not found_any:
         await message.reply("ℹ️ No deals available.")
@@ -1216,6 +1219,7 @@ async def view_deals(message: types.Message):
 
         for col in df.select_dtypes(include="object"):
             df[col] = df[col].map(safe_excel)
+            
         try:
             df.to_excel(path, index=False)
             await message.reply_document(types.FSInputFile(path))
@@ -1256,9 +1260,6 @@ async def request_deal_start(message: types.Message):
     )
 
     out = "/tmp/request_deal_bulk.xlsx"
-
-    for col in bulk_df.select_dtypes(include="object"):
-        bulk_df[col] = bulk_df[col].map(safe_excel)
 
     bulk_df.to_excel(out, index=False)
 
@@ -1314,9 +1315,10 @@ async def handle_text(message: types.Message):
     if state and state.get("step") == "login_password":
         df = load_accounts()
         username = state["username"].strip().lower()
-        password = text.strip()
+        password = hashlib.sha256(text.strip().encode()).hexdigest()
 
         df["USERNAME"] = df["USERNAME"].astype(str).str.strip().str.lower()
+        df = df.dropna(subset=["USERNAME", "PASSWORD"])
         df["PASSWORD"] = df["PASSWORD"].astype(str).str.strip()
 
         r = df[
@@ -1330,7 +1332,7 @@ async def handle_text(message: types.Message):
             user_state.pop(uid, None)
             return
 
-        if r.iloc[0]["APPROVED"] != YES:
+        if str(r.iloc[0]["APPROVED"]).strip().upper() != "YES":
             await message.reply("❌ Your account is not approved yet.")
             user_state.pop(uid, None)
             return
@@ -1339,7 +1341,9 @@ async def handle_text(message: types.Message):
         role = str(r.iloc[0]["ROLE"]).strip().lower()
         
         # Force prince as admin (optional safety)
-        ADMIN_USERS = os.getenv("ADMIN_USERS", "").lower().split(",")
+        ADMIN_USERS = [
+            u.strip() for u in os.getenv("ADMIN_USERS", "").lower().split(",") if u.strip()
+        ]
 
         if r.iloc[0]["USERNAME"].strip().lower() in ADMIN_USERS:
             role = "admin"
@@ -1431,13 +1435,25 @@ async def handle_text(message: types.Message):
                 user_state.pop(uid, None)
                 return
 
-            fresh_df = load_stock()
-            row = fresh_df[
-                (fresh_df["Stock #"] == stone_id) &
-                (fresh_df["LOCKED"] != "YES")
+            row = df[
+                (df["Stock #"] == stone_id) &
+                (df["LOCKED"] != "YES")
             ]
+            
             if row.empty:
-                await message.reply("❌ Stone not found.")
+                await message.reply("❌ Stone not available or already locked.")
+                user_state.pop(uid, None)
+                return
+
+            # 🔒 Reload stock before locking (race safety)
+            latest_df = load_stock()
+            latest_row = latest_df[
+                (latest_df["Stock #"] == stone_id) &
+                (latest_df["LOCKED"] != "YES")
+            ]
+
+            if latest_row.empty:
+                await message.reply("🔒 Stone just got locked by another user.")
                 user_state.pop(uid, None)
                 return
 
@@ -1530,7 +1546,7 @@ async def handle_text(message: types.Message):
         # Create sample Excel in memory
         df = pd.DataFrame({
             "Stock #": ["D001", "D002", "D003"],
-            "Loaction": ["Mumbai", "Delhi", "Bangalore"],
+            "Location": ["Mumbai", "Delhi", "Bangalore"],
             "Shape": ["Round", "Oval", "Princess"],
             "Weight": [1.0, 1.5, 2.0],
             "Color": ["White", "Yellow", "Pink"],
@@ -1541,13 +1557,13 @@ async def handle_text(message: types.Message):
             "FLS": ["Yes", "No", "Yes"],
             "Price Per Carat": [10000, 15000, 20000],
             "Total Price": [10000, 15000, 20000],
-            "Measurment": ["6.5x6.5x4.0", "7.0x5.5x3.5", "8.0x6.0x4.0"],
+            "Measurement": ["6.5x6.5x4.0", "7.0x5.5x3.5", "8.0x6.0x4.0"],
             "Table %": [57, 58, 59],
             "Depth %": [61, 62, 63],
             "Video": ["link1", "link2", "link3"],
             "Report #": ["R001", "R002", "R003"],
             "Lab": ["GIA", "IGI", "HRD"],
-            "Cpmapany Comment": ["Good quality", "Premium", "Rare cut"],
+            "Company Comment": ["Good quality", "Premium", "Rare cut"],
             "Image": ["img1.jpg", "img2.jpg", "img3.jpg"],
             "Stock Status": ["Available", "Reserved", "Sold"],
             "Contact Number": ["1234567890", "0987654321", "1122334455"],
@@ -1739,8 +1755,9 @@ async def handle_text(message: types.Message):
 
                 # 🔒 REMOVE SUPPLIER COLUMN FOR CLIENT VIEW ONLY
                 excel_df = df.drop(columns=["SUPPLIER"], errors="ignore")
-
-                excel_df = excel_df.applymap(safe_excel)
+                
+                for col in excel_df.select_dtypes(include="object"):
+                    excel_df[col] = excel_df[col].map(safe_excel)
                 excel_df.to_excel(out, index=False)
 
                 await message.reply_document(
@@ -1848,6 +1865,9 @@ async def handle_doc(message: types.Message):
 
         processed_stones = set()
 
+        # ✅ Load stock once for performance
+        latest_df_cache = load_stock()
+
         for _, row in df.iterrows():
             if pd.isna(row.get("Stock #")) or pd.isna(row.get("Offer Price ($/ct)")):
                 continue
@@ -1864,14 +1884,15 @@ async def handle_doc(message: types.Message):
 
             try:
                 offer_price = float(row["Offer Price ($/ct)"])
+                if offer_price <= 0:
+                    continue
             except:
                 continue
 
             if "LOCKED" in stock_df.columns:
-                fresh_stock = load_stock()
 
-                stock_row = fresh_stock.loc[
-                    fresh_stock["Stock #"] == stone_id
+                stock_row = stock_df.loc[
+                    stock_df["Stock #"] == stone_id
                 ]
 
                 if stock_row.empty:
@@ -1913,15 +1934,25 @@ async def handle_doc(message: types.Message):
                 "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M"),
             }
 
+            # 🔒 Final safety check before lock (REAL race protection)
+            latest_df = load_stock()
+            latest_row = latest_df[
+                (latest_df["Stock #"] == stone_id) &
+                (latest_df["LOCKED"] != "YES")
+            ]
+
+            if latest_row.empty:
+                continue
+            
+            # 🔒 Lock stone safely
+            lock_stone(stone_id)
+
             s3.put_object(
                 Bucket=AWS_BUCKET,
                 Key=f"{DEALS_FOLDER}{deal_id}.json",
                 Body=json.dumps(deal, indent=2),
                 ContentType="application/json"
             )
-            
-            # 🔒 Lock stone safely
-            lock_stone(stone_id)
 
             save_notification(
                 supplier,
@@ -1989,8 +2020,7 @@ async def handle_doc(message: types.Message):
         except Exception:
             await message.reply("❌ Invalid Excel file.")
             return
-        await bot.download_file(file.file_path, path)
-
+    
         df = pd.read_excel(path)
 
         required_cols = [
@@ -2001,6 +2031,8 @@ async def handle_doc(message: types.Message):
         for col in required_cols:
             if col not in df.columns:
                 await message.reply("❌ Invalid admin approval Excel format.")
+                if os.path.exists(path):
+                    os.remove(path)
                 return
 
         for _, row in df.iterrows():
@@ -2121,14 +2153,13 @@ async def handle_doc(message: types.Message):
     ):
 
         file = await bot.get_file(message.document.file_id)
+        path = f"/tmp/{uid}_{int(time.time())}_{message.document.file_name}"
+        await bot.download_file(file.file_path, path)
         try:
             df = pd.read_excel(path)
         except Exception:
             await message.reply("❌ Invalid Excel file.")
             return
-        await bot.download_file(file.file_path, path)
-
-        df = pd.read_excel(path)
 
         required_cols = [
             "Deal ID",
@@ -2137,6 +2168,8 @@ async def handle_doc(message: types.Message):
         for col in required_cols:
             if col not in df.columns:
                 await message.reply("❌ Invalid supplier approval Excel format.")
+                if os.path.exists(path):
+                    os.remove(path)
                 return
 
         processed = 0
@@ -2231,9 +2264,6 @@ async def handle_doc(message: types.Message):
     except Exception:
         await message.reply("❌ Invalid Excel file.")
         return
-
-
-    df = pd.read_excel(path)
 
     required_cols = [
         "Stock #","Shape","Weight","Color","Clarity",
