@@ -316,7 +316,7 @@ def get_logged_user(uid):
         save_sessions()
         return None
 
-    return user
+    return user 
 
 def is_admin(user):
     return user is not None and user.get("ROLE") == "admin"
@@ -1393,6 +1393,11 @@ async def handle_text(message: types.Message):
     state = user_state.get(uid)
     print("STATE DEBUG:", state)
 
+    # 🔄 Update last activity for logged-in users
+    if uid in logged_in_users:
+        logged_in_users[uid]["last_active"] = time.time()
+        save_sessions()
+
     
 
     # ================= LOGIN FLOW =================
@@ -1998,24 +2003,6 @@ async def handle_doc(message: types.Message):
                     continue
             except:
                 continue
-
-            if "LOCKED" in stock_df.columns:
-
-                stock_row = stock_df.loc[
-                    stock_df["Stock #"] == stone_id
-                ]
-
-                if stock_row.empty:
-                    continue
-
-                if stock_row.iloc[0].get("LOCKED") == "YES":
-                    continue
-            else:
-                stock_row = stock_df[stock_df["Stock #"] == stone_id]
-
-            if stock_row.empty:
-                continue
-
 
             r = stock_row.iloc[0]
             actual_price = pd.to_numeric(
