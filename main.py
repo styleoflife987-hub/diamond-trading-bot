@@ -1394,11 +1394,15 @@ async def handle_text(message: types.Message):
         return
 
     text = message.text.strip()
+    state = user_state.get(uid)
 
     # 🚫 Ignore commands so they don't break state flow
     if text.startswith("/") and not state:
         return
-    state = user_state.get(uid)
+
+    # ✅ LOGIN FLOW MUST RUN FIRST
+    if state and state.get("step") in ["login_username", "login_password"]:
+        pass
     print("STATE DEBUG:", state)
 
     # 🔄 Update last activity for logged-in users
