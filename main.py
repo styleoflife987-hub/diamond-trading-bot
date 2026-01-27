@@ -511,6 +511,59 @@ async def account_flow_handler(message: types.Message):
         )
         return
 
+# -------- LOGIN FLOW --------
+if step == "login_username":
+    user_state[uid]["login_username"] = text.lower()
+    user_state[uid]["step"] = "login_password"
+    await message.reply("🔐 Enter Password:")
+    return
+
+
+if step == "login_password":
+    username = user_state[uid].get("login_username")
+    password = text
+
+    df = load_accounts()
+    row = df[
+        (df["USERNAME"] == username) &
+        (df["PASSWORD"] == password) &
+        (df["APPROVED"] == "YES")
+    ]
+
+    if row.empty:
+        await message.reply("❌ Invalid login or not approved by admin.")
+        user_state.pop(uid, None)
+        return
+
+    user = row.iloc[0].to_dict()
+
+    # ✅ Save session
+    logged_in_users[uid] = {
+        **user,
+        "last_active": time.time()
+    }
+    save_sessions()
+
+    user_state.pop(uid, None)
+
+    # 🎯 Keyboard based on role
+    role = user["ROLE"].lower()
+    if role == "admin":
+        kb = admin_kb
+    elif role == "supplier":
+        kb = supplier_kb
+    else:
+        kb = client_kb
+
+    await message.reply(
+        f"✅ Login successful!\nWelcome {username}",
+        reply_markup=kb
+    )
+
+    log_activity(user, "LOGIN")
+    return
+
+
 # ---------------- LOGOUT ----------------
 
 @dp.message(F.text == "🚪 Logout")
