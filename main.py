@@ -444,8 +444,16 @@ async def create_account(message: types.Message):
 
 @dp.message(Command("login"))
 async def login(message: types.Message):
-    user_state[message.from_user.id] = {"step": "login_username"}
-    await message.reply("Enter Username:")
+    uid = message.from_user.id
+
+    # ✅ Prevent restarting login if already in flow
+    if uid in user_state and user_state[uid].get("step") in ["login_username", "login_password"]:
+        await message.reply("⚠️ Login already in progress. Please enter username or password.")
+        return
+
+    user_state[uid] = {"step": "login_username"}
+    await message.reply("👤 Enter Username:")
+
 
 # ---------------- ACCOUNT FLOW HANDLER ----------------
 
