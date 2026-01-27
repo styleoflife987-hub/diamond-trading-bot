@@ -1485,6 +1485,7 @@ async def handle_text(message: types.Message):
         return
 
 
+
     # ================= DEAL REQUEST FLOW =================
     if state and state.get("step") in ["deal_stone", "deal_price"]:
         step = state.get("step")
