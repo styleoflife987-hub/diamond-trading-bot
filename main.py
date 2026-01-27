@@ -1235,7 +1235,13 @@ async def view_deals(message: types.Message):
 @dp.message(F.text == "🤝 Request Deal")
 async def request_deal_start(message: types.Message):
     user = get_logged_user(message.from_user.id)
-    if not user or user["ROLE"] != "client":
+
+    if not user:
+        await message.reply("🔒 Please login first.")
+        return
+
+    if user["ROLE"] != "client":
+        await message.reply("❌ Only clients can request deals.")
         return
 
     df = load_stock()
@@ -1537,6 +1543,7 @@ async def handle_text(message: types.Message):
     # -------- BUTTON HANDLING --------
     user = get_logged_user(uid)
     if not user:
+        await message.reply("🔒 Please login first using /login")
         return
 
     if text == "💎 Search Diamonds":
