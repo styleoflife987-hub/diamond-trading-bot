@@ -298,8 +298,25 @@ SESSION_KEY = "sessions/logged_in_users.json"
 logged_in_users = {}
 user_state = {}
 
+SESSION_TIMEOUT = 3600  # 1 hour
+
+def touch_session(uid):
+    if uid in logged_in_users:
+        logged_in_users[uid]["last_active"] = time.time()
+        save_sessions()
+
 def get_logged_user(uid):
-    return logged_in_users.get(uid)
+    user = logged_in_users.get(uid)
+    if not user:
+        return None
+
+    # ⏳ Auto logout inactive users
+    if time.time() - user.get("last_active", 0) > SESSION_TIMEOUT:
+        logged_in_users.pop(uid, None)
+        save_sessions()
+        return None
+
+    return user
 
 def is_admin(user):
     return user is not None and user.get("ROLE") == "admin"
@@ -496,7 +513,6 @@ async def account_flow_handler(message: types.Message):
 
 # ---------------- LOGOUT ----------------
 
-@dp.message(Command("logout"))
 @dp.message(F.text == "🚪 Logout")
 async def logout(message: types.Message):
     uid = message.from_user.id
@@ -509,14 +525,16 @@ async def logout(message: types.Message):
         logged_in_users[uid],
         "LOGOUT"
     )
+
     logged_in_users.pop(uid, None)
+    user_state.pop(uid, None)   # ✅ clear state also
     save_sessions()
-    user_state.pop(uid, None)
 
     await message.reply(
         "✅ Logged out successfully.\n/login to continue.",
         reply_markup=types.ReplyKeyboardRemove()
     )
+
 # ---------------- Supplier Button Logic ----------------
 
 # 1️⃣ Pending Accounts
@@ -1119,8 +1137,13 @@ async def supplier_price_excel_analytics(message: types.Message):
 @dp.message(F.text == "🤝 View Deals")
 async def view_deals(message: types.Message):
     user = get_logged_user(message.from_user.id)
+
     if not user:
-        await message.reply("ℹ️ User not found.")
+        await message.reply("🔒 Please login first.")
+        return
+
+    if user["ROLE"] not in ["admin", "supplier", "client"]:
+        await message.reply("❌ Unauthorized access.")
         return
 
     paginator = s3.get_paginator("list_objects_v2")
@@ -1364,6 +1387,7 @@ async def handle_text(message: types.Message):
 
         logged_in_users[uid] = {
             "USERNAME": r.iloc[0]["USERNAME"],
+            "last_active": time.time(),
             "ROLE": role,
             "SUPPLIER_KEY": (
                 f"supplier_{r.iloc[0]['USERNAME'].lower()}"
@@ -1508,7 +1532,10 @@ async def handle_text(message: types.Message):
                 ContentType="application/json"
             )
 
-            lock_stone(stone_id)
+            if not lock_stone(stone_id):
+                await message.reply("🔒 Stone already locked.")
+                user_state.pop(uid, None)
+                return
 
             save_notification(
                 username=r["SUPPLIER"].replace("supplier_", "").lower(),
@@ -1546,12 +1573,20 @@ async def handle_text(message: types.Message):
         await message.reply("🔒 Please login first using /login")
         return
 
+    # 🔄 Refresh user activity timestamp
+    logged_in_users[uid]["last_active"] = time.time()
+    save_sessions()
+
     if text == "💎 Search Diamonds":
         user_state[uid] = {"step": "search_carat", "search": {}}
         await message.reply("Enter Weight (e.g., 1 or 1-1.5, or 'any'):")
         return
 
     if text == "📤 Upload Excel":
+        if user["ROLE"] != "supplier":
+            await message.reply("❌ Only suppliers can upload diamonds.")
+            return
+
         await message.reply("Send Excel file 📊")
         return
 
@@ -1806,17 +1841,25 @@ async def handle_text(message: types.Message):
 
 # ---------------- SAFE STOCK LOCK ----------------
 
-def lock_stone(stone_id: str):
+def lock_stone(stone_id: str) -> bool:
     df = load_stock()
     if df.empty:
-        return
+        return False
 
-    df.loc[df["Stock #"] == stone_id, "LOCKED"] = "YES"
+    mask = (df["Stock #"] == stone_id) & (df["LOCKED"] != "YES")
+
+    if not mask.any():
+        return False   # already locked
+
+    df.loc[mask, "LOCKED"] = "YES"
+
     temp = "/tmp/all_suppliers_stock.xlsx"
     for col in df.select_dtypes(include="object"):
         df[col] = df[col].map(safe_excel)
+
     df.to_excel(temp, index=False)
     s3.upload_file(temp, AWS_BUCKET, COMBINED_STOCK_KEY)
+    return True
 
 
 def unlock_stone(stone_id: str):
@@ -1850,6 +1893,11 @@ async def handle_doc(message: types.Message):
 
     if not user:
         await message.reply("🔒 Please login first.")
+        return
+
+    # 🚫 Block unauthorized file uploads early
+    if user["ROLE"] not in ["client", "supplier", "admin"]:
+        await message.reply("❌ Unauthorized upload attempt.")
         return
 
     # ==========================================================
@@ -1958,7 +2006,8 @@ async def handle_doc(message: types.Message):
                 continue
             
             # 🔒 Lock stone safely
-            lock_stone(stone_id)
+            if not lock_stone(stone_id):
+                continue
 
             s3.put_object(
                 Bucket=AWS_BUCKET,
