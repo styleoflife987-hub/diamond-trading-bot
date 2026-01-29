@@ -16,6 +16,18 @@ import json
 import pytz
 import uuid
 import time
+import unicodedata
+
+def clean_text(value):
+    if value is None:
+        return ""
+    value = str(value)
+    value = unicodedata.normalize("NFKC", value)
+    value = value.replace("\u00A0", " ")
+    value = value.replace("\u200B", "")
+    value = value.replace("\n", "").replace("\r", "")
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -613,15 +625,19 @@ async def account_flow_handler(message: types.Message):
         df = load_accounts()
 
         # ✅ Normalize dataframe
-        df["USERNAME"] = df["USERNAME"].astype(str).str.strip().str.lower()
-        df["PASSWORD"] = df["PASSWORD"].astype(str).str.strip()
-        df["APPROVED"] = df["APPROVED"].astype(str).str.strip().str.upper()
+        df["USERNAME"] = df["USERNAME"].astype(str).apply(clean_text).str.lower()
+        df["PASSWORD"] = df["PASSWORD"].astype(str).apply(clean_text)
+        df["APPROVED"] = df["APPROVED"].astype(str).apply(clean_text).str.upper()
 
         row = df[
             (df["USERNAME"] == username) &
             (df["PASSWORD"] == password) &
             (df["APPROVED"] == "YES")
         ]
+
+        print("DEBUG LOGIN DATA:")
+        print(df[["USERNAME","PASSWORD","APPROVED"]].head(10))
+        print("INPUT:", username, password)
 
         if row.empty:
             await message.reply("❌ Invalid login or not approved by admin.")
@@ -1526,30 +1542,23 @@ async def handle_text(message: types.Message):
         print(df[["USERNAME", "PASSWORD", "APPROVED", "ROLE"]].head(20))
         print("=======================")
 
-        # ✅ Normalize columns safely
-        df["USERNAME"] = df["USERNAME"].astype(str).str.strip().str.lower()
+        def normalize_text(x):
+            if x is None:
+                return ""
+            x = str(x)
+            x = unicodedata.normalize("NFKC", x)
+            x = x.replace("\n", "").replace("\r", "").replace("\u00A0", " ")
+            return x.strip()
 
-        # 🔥 IMPORTANT FIX — remove .0 from numeric passwords
-        df["PASSWORD"] = (
-            df["PASSWORD"]
-            .astype(str)
-            .str.replace(".0", "", regex=False)
-            .str.strip()
-        )
+        # ✅ Clean dataframe once only
+        df["USERNAME"] = df["USERNAME"].apply(normalize_text).str.lower()
+        df["PASSWORD"] = df["PASSWORD"].apply(normalize_text).str.replace(".0", "", regex=False)
+        df["APPROVED"] = df["APPROVED"].apply(normalize_text).str.upper()
+        df["ROLE"] = df["ROLE"].apply(normalize_text).str.lower()
 
-        df["APPROVED"] = df["APPROVED"].astype(str).str.strip().str.upper()
-        df["ROLE"] = df["ROLE"].astype(str).str.strip().str.lower()
-
-
-        username_clean = str(username).strip().lower()
-        password_clean = str(password).strip().replace(".0", "")
-
-        df["USERNAME"] = df["USERNAME"].astype(str).str.normalize("NFKC").str.strip().str.lower()
-        df["PASSWORD"] = df["PASSWORD"].astype(str).str.normalize("NFKC").str.replace(".0","", regex=False).str.strip()
-        df["APPROVED"] = df["APPROVED"].astype(str).str.normalize("NFKC").str.strip().str.upper()
-
-        username_clean = str(username).strip().lower()
-        password_clean = str(password).strip().replace(".0", "")
+        # ✅ Clean input
+        username_clean = normalize_text(username).lower()
+        password_clean = normalize_text(password).replace(".0", "")
 
         r = df[
             (df["USERNAME"] == username_clean) &
