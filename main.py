@@ -57,16 +57,16 @@ AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
 AWS_BUCKET = os.getenv("AWS_BUCKET")
 
-ACCOUNTS_KEY = "users/accounts.xlsx"
+ACCOUNTS_KEY = "diamond-bucket-styleoflifes/users/accounts.xlsx"
 READ_ONLY_ACCOUNTS = True
-STOCK_KEY = "stock/diamonds.xlsx"
+STOCK_KEY = "diamond-bucket-styleoflifes/stock/diamonds.xlsx"
 
-SUPPLIER_STOCK_FOLDER = "stock/suppliers/"
-COMBINED_STOCK_KEY = "stock/combined/all_suppliers_stock.xlsx"
-ACTIVITY_LOG_FOLDER = "activity_logs/"
-DEALS_FOLDER = "deals/"
-DEAL_HISTORY_KEY = "deals/deal_history.xlsx"
-NOTIFICATIONS_FOLDER = "notifications/"
+SUPPLIER_STOCK_FOLDER = "diamond-bucket-styleoflifes/stock/suppliers/"
+COMBINED_STOCK_KEY = "diamond-bucket-styleoflifes/stock/combined/all_suppliers_stock.xlsx"
+ACTIVITY_LOG_FOLDER = "diamond-bucket-styleoflifes/activity_logs/"
+DEALS_FOLDER = "diamond-bucket-styleoflifes/deals/"
+DEAL_HISTORY_KEY = "diamond-bucket-styleoflifes/deals/deal_history.xlsx"
+NOTIFICATIONS_FOLDER = "diamond-bucket-styleoflifes/notifications/"
 
 
 # ---------------- BOT INIT ----------------
