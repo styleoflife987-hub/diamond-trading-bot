@@ -58,6 +58,7 @@ AWS_REGION = os.getenv("AWS_REGION", "ap-south-1")
 AWS_BUCKET = os.getenv("AWS_BUCKET")
 
 ACCOUNTS_KEY = "users/accounts.xlsx"
+READ_ONLY_ACCOUNTS = True
 STOCK_KEY = "stock/diamonds.xlsx"
 
 SUPPLIER_STOCK_FOLDER = "stock/suppliers/"
