@@ -1544,11 +1544,19 @@ async def handle_text(message: types.Message):
         username_clean = str(username).strip().lower()
         password_clean = str(password).strip().replace(".0", "")
 
+        df["USERNAME"] = df["USERNAME"].astype(str).str.normalize("NFKC").str.strip().str.lower()
+        df["PASSWORD"] = df["PASSWORD"].astype(str).str.normalize("NFKC").str.replace(".0","", regex=False).str.strip()
+        df["APPROVED"] = df["APPROVED"].astype(str).str.normalize("NFKC").str.strip().str.upper()
+
+        username_clean = str(username).strip().lower()
+        password_clean = str(password).strip().replace(".0", "")
+
         r = df[
-            (df["USERNAME"].str.strip().str.lower() == username_clean) &
-            (df["PASSWORD"].astype(str).str.replace(".0","",regex=False).str.strip() == password_clean) &
-            (df["APPROVED"].astype(str).str.strip().str.upper() == "YES")
+            (df["USERNAME"] == username_clean) &
+            (df["PASSWORD"] == password_clean) &
+            (df["APPROVED"] == "YES")
         ]
+
         print("LOGIN MATCH ROWS:", len(r))
 
         if r.empty:
