@@ -450,6 +450,15 @@ def save_sessions():
         ContentType="application/json"
     )
 
+async def session_cleanup_loop():
+    while True:
+        try:
+            cleanup_sessions()
+        except Exception as e:
+            print("Session cleanup error:", e)
+        await asyncio.sleep(600)  # every 10 minutes
+
+
 def load_sessions():
     global logged_in_users
     try:
@@ -459,9 +468,21 @@ def load_sessions():
     except:
         logged_in_users = {}
 
-def cleanup_sessions(timeout=60*60):  # 1 hour inactivity
+def cleanup_sessions(timeout=60*60):
     now = time.time()
     expired = []
+
+    for uid, data in list(logged_in_users.items()):
+        if now - data.get("last_active", now) > timeout:
+            expired.append(uid)
+
+    for uid in expired:
+        print("🧹 Auto logout user:", uid)
+        logged_in_users.pop(uid, None)
+
+    if expired:
+        save_sessions()
+
 
 def is_rate_limited(uid, limit=5, window=10):
     now = time.time()
@@ -2697,7 +2718,6 @@ async def startup_event():
     # ✅ HARD LOCK — prevent duplicate polling
     if not hasattr(startup_event, "started"):
         startup_event.started = True
-        asyncio.create_task(dp.start_polling(bot))
         asyncio.create_task(session_cleanup_loop())
         print("✅ Bot polling started")
     else:
@@ -2708,3 +2728,13 @@ async def startup_event():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
+
+async def main():
+    load_sessions()
+    asyncio.create_task(session_cleanup_loop())
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    nest_asyncio.apply()
+    asyncio.run(main())
