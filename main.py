@@ -290,9 +290,12 @@ def load_accounts():
         return pd.DataFrame(columns=["USERNAME","PASSWORD","ROLE","APPROVED"])
 
 def save_accounts(df):
+    if READ_ONLY_ACCOUNTS:
+        print("⚠️ Accounts file is READ ONLY. Skipping save.")
+        return
+
     df.to_excel("/tmp/accounts.xlsx", index=False)
     s3.upload_file("/tmp/accounts.xlsx", AWS_BUCKET, ACCOUNTS_KEY)
-
 
 SESSION_KEY = "sessions/logged_in_users.json"
 
@@ -582,41 +585,21 @@ async def account_flow_handler(message: types.Message):
         await message.reply("🔐 Enter Password:")
         return
 
-        df = load_accounts()
-
-        username_clean = str(username).strip().lower()
-        password_clean = str(password).strip()
-
-        print("🔍 USER INPUT:", username_clean, password_clean)
-        print("📄 DATAFRAME:")
-        print(df)
-
-        row = df[
-            (df["USERNAME"].astype(str).str.strip().str.lower() == username_clean) &
-            (df["PASSWORD"].astype(str).str.strip() == password_clean) &
-            (df["APPROVED"].astype(str).str.strip().str.upper() == "YES")
-        ]
-
-        print("✅ LOGIN MATCH ROWS:", len(row))
-        print(row)
-
-        if row.empty:
-            await message.reply("❌ Invalid login or not approved by admin.")
-            user_state.pop(uid, None)
-            return
-
-
-
     if step == "login_password":
         username = user_state[uid].get("login_username")
-        password = text
+        password = text.strip()
 
         df = load_accounts()
 
+        # ✅ Normalize dataframe
+        df["USERNAME"] = df["USERNAME"].astype(str).str.strip().str.lower()
+        df["PASSWORD"] = df["PASSWORD"].astype(str).str.strip()
+        df["APPROVED"] = df["APPROVED"].astype(str).str.strip().str.upper()
+
         row = df[
-            (df["USERNAME"].astype(str).str.strip().str.lower() == username) &
-            (df["PASSWORD"].astype(str).str.strip() == password) &
-            (df["APPROVED"].astype(str).str.strip().str.upper() == "YES")
+            (df["USERNAME"] == username) &
+            (df["PASSWORD"] == password) &
+            (df["APPROVED"] == "YES")
         ]
 
         if row.empty:
