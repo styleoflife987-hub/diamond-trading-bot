@@ -713,13 +713,14 @@ async def pending_accounts(message: types.Message):
 
     # ✅ normalize APPROVED column
     df["APPROVED"] = (
-        df["APPROVED"]
-        .fillna("NO")
+    df["APPROVED"]
         .astype(str)
+        .str.replace("\r", "", regex=False)
+        .str.replace("\n", "", regex=False)
+        .str.replace("\u00A0", "", regex=False)
         .str.strip()
         .str.upper()
-    )
-
+        )
     pending_df = df[df["APPROVED"] != "YES"]
 
     if pending_df.empty:
@@ -1535,6 +1536,23 @@ async def handle_text(message: types.Message):
         password = text
 
         df = load_accounts()
+
+        import unicodedata
+
+        def normalize_text(x):
+            if x is None:
+                return ""
+            x = str(x)
+            x = unicodedata.normalize("NFKC", x)
+            x = x.replace("\r", "").replace("\n", "").replace("\u00A0", "")
+            return x.strip()
+
+        def clean_password(x):
+            x = normalize_text(x)
+            if x.endswith(".0"):   # Excel numeric password fix
+                x = x[:-2]
+            return x
+
 
         print("===== LOGIN DEBUG =====")
         print("INPUT USERNAME:", username)
