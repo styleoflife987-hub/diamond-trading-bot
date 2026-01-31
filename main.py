@@ -9,6 +9,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
+from fastapi import FastAPI
 import os
 import json
 import pytz
@@ -51,6 +52,9 @@ STATUS_ACCEPTED = "ACCEPTED"
 STATUS_REJECTED = "REJECTED"
 STATUS_COMPLETED = "COMPLETED"
 STATUS_CLOSED = "CLOSED"
+
+# ====== Create FastAPI App ======
+app = FastAPI()
 
 # ---------------- CONFIG ----------------
 
