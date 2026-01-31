@@ -2087,7 +2087,7 @@ def load_accounts():
                 df[col]
                 .fillna("")
                 .astype(str)
-                .str.strip()
+                .apply(normalize_text)
             )
 
         print("✅ ACCOUNTS LOADED:")
