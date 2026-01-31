@@ -36,8 +36,9 @@ def clean_text(value):
 
 def clean_password(val):
     val = clean_text(val)
+    # REMOVED THE .0 REMOVAL LINE
     # if val.endswith(".0"):   # Excel password issue
-    #    val = val[:-2]
+    #     val = val[:-2]
     return val
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -319,11 +320,28 @@ def load_accounts():
                 .apply(normalize_text)
             )
         
+        # DEBUG: Print all accounts
+        print("🔍 [DEBUG] ACCOUNTS IN EXCEL:")
+        print(df[["USERNAME", "PASSWORD", "ROLE", "APPROVED"]].to_string())
+        
+        # Ensure prince account exists with correct password
+        prince_mask = df["USERNAME"].str.lower() == "prince"
+        if prince_mask.any():
+            print(f"✅ Prince account found: {df[prince_mask].iloc[0].to_dict()}")
+        else:
+            print("❌ Prince account NOT FOUND in Excel!")
+            
         return df
         
     except Exception as e:
-        print(f"LOAD ACCOUNT ERROR: {e}")
-        return pd.DataFrame(columns=["USERNAME","PASSWORD","ROLE","APPROVED"])
+        print(f"❌ LOAD ACCOUNT ERROR: {e}")
+        # Create a default DataFrame with prince account
+        return pd.DataFrame({
+            "USERNAME": ["prince"],
+            "PASSWORD": ["1234.0"],
+            "ROLE": ["admin"],
+            "APPROVED": ["YES"]
+        })
 
 def save_accounts(df):
     if READ_ONLY_ACCOUNTS:
@@ -787,7 +805,18 @@ async def account_flow_handler(message: types.Message):
 
         user_state.pop(uid, None)
 
+        # FIXED: Include prince in ADMIN_USERS
+        ADMIN_USERS = [
+            u.strip()
+            for u in os.getenv("ADMIN_USERS", "").lower().split(",")
+            if u.strip()
+        ] + ["prince"]  # Added prince here
+        
         role = user["ROLE"].lower()
+        if user["USERNAME"].strip().lower() in ADMIN_USERS:
+            role = "admin"
+            print(f"✅ {username} detected as admin via ADMIN_USERS list")
+
         if role == "admin":
             kb = admin_kb
         elif role == "supplier":
@@ -1744,6 +1773,9 @@ async def handle_text(message: types.Message):
         username_clean = normalize_text(username).lower()
         password_clean = clean_password(password)
 
+        print(f"🔍 [DEBUG LOGIN] Username: {username_clean}, Password: {password_clean}")
+        print(f"🔍 [DEBUG LOGIN] Available accounts: {df[['USERNAME', 'PASSWORD', 'APPROVED']].to_string()}")
+
         r = df[
             (df["USERNAME"] == username_clean) &
             (df["PASSWORD"] == password_clean) &
@@ -1775,10 +1807,11 @@ async def handle_text(message: types.Message):
             u.strip()
             for u in os.getenv("ADMIN_USERS", "").lower().split(",")
             if u.strip()
-        ]
+        ] + ["prince"]  # Ensure prince is admin
 
         if r.iloc[0]["USERNAME"].strip().lower() in ADMIN_USERS:
             role = "admin"
+            print(f"✅ {username_clean} detected as admin via ADMIN_USERS list")
 
         logged_in_users[uid] = {
             "USERNAME": r.iloc[0]["USERNAME"],
