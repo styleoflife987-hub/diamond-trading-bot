@@ -95,7 +95,6 @@ DEALS_FOLDER = "deals/"
 DEAL_HISTORY_KEY = "deals/deal_history.xlsx"
 NOTIFICATIONS_FOLDER = "notifications/"
 SESSION_KEY = "sessions/logged_in_users.json"
-LOGIN_ATTEMPTS_KEY = "sessions/login_attempts.json"
 
 # -------- INITIALIZE AWS CLIENTS --------
 s3 = boto3.client("s3", **{k: v for k, v in AWS_CONFIG.items() if v})
@@ -108,7 +107,6 @@ dp = Dispatcher()
 logged_in_users = {}
 user_state = {}
 user_rate_limit = {}
-login_attempts = {}
 
 # -------- KEYBOARDS --------
 admin_kb = ReplyKeyboardMarkup(
@@ -244,28 +242,6 @@ def load_sessions():
         logger.warning(f"No existing sessions or error loading: {e}")
         logged_in_users = {}
 
-def save_login_attempts():
-    """Save login attempts to S3"""
-    try:
-        s3.put_object(
-            Bucket=CONFIG["AWS_BUCKET"],
-            Key=LOGIN_ATTEMPTS_KEY,
-            Body=json.dumps(login_attempts, default=str),
-            ContentType="application/json"
-        )
-    except Exception as e:
-        logger.error(f"Failed to save login attempts: {e}")
-
-def load_login_attempts():
-    """Load login attempts from S3"""
-    global login_attempts
-    try:
-        obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=LOGIN_ATTEMPTS_KEY)
-        raw = json.loads(obj["Body"].read())
-        login_attempts = {int(k): v for k, v in raw.items()}
-    except Exception:
-        login_attempts = {}
-
 def cleanup_sessions():
     """Remove expired sessions"""
     now = time.time()
@@ -300,31 +276,6 @@ def is_rate_limited(uid: int) -> bool:
     history.append(now)
     user_rate_limit[uid] = history[-10:]  # Keep last 10 timestamps
     return False
-
-def check_login_attempts(uid: int) -> bool:
-    """Check if user has too many failed login attempts"""
-    attempts = login_attempts.get(uid, {"count": 0, "time": time.time()})
-    
-    # Reset if last attempt was more than 10 minutes ago
-    if time.time() - attempts["time"] > 600:
-        login_attempts[uid] = {"count": 0, "time": time.time()}
-        return False
-    
-    return attempts["count"] >= 5
-
-def record_failed_login(uid: int):
-    """Record a failed login attempt"""
-    attempts = login_attempts.get(uid, {"count": 0, "time": time.time()})
-    attempts["count"] += 1
-    attempts["time"] = time.time()
-    login_attempts[uid] = attempts
-    save_login_attempts()
-
-def clear_login_attempts(uid: int):
-    """Clear failed login attempts for user"""
-    if uid in login_attempts:
-        login_attempts.pop(uid)
-        save_login_attempts()
 
 # -------- DATA LOADING/SAVING --------
 def load_accounts() -> pd.DataFrame:
@@ -846,9 +797,8 @@ async def lifespan(app: FastAPI):
     logger.info("🤖 Diamond Trading Bot starting up...")
     
     try:
-        # Load sessions and login attempts
+        # Load sessions
         load_sessions()
-        load_login_attempts()
         
         # Delete webhook for polling
         await bot.delete_webhook(drop_pending_updates=True)
@@ -873,7 +823,6 @@ async def lifespan(app: FastAPI):
     
     # Save sessions before shutdown
     save_sessions()
-    save_login_attempts()
     
     BOT_STARTED = False
     logger.info("✅ Bot shutdown complete")
@@ -976,14 +925,6 @@ async def login_command(message: types.Message):
         await message.reply(
             f"ℹ️ You're already logged in as {user['USERNAME']}.\n"
             "Use /logout to sign out first."
-        )
-        return
-    
-    # Check for too many failed attempts
-    if check_login_attempts(uid):
-        await message.reply(
-            "🚫 Too many failed login attempts.\n"
-            "Please wait 10 minutes before trying again."
         )
         return
     
@@ -1148,14 +1089,8 @@ async def handle_all_messages(message: types.Message):
             ]
             
             if user_row.empty:
-                # Record failed attempt
-                record_failed_login(uid)
-                attempts = login_attempts.get(uid, {"count": 0})
-                
                 await message.reply(
-                    f"❌ Invalid login\n\n"
-                    f"Failed attempts: {attempts['count']}/5\n"
-                    "━━━━━━━━━━━━━━\n"
+                    "❌ Invalid login credentials\n\n"
                     "Possible reasons:\n"
                     "• Username/password incorrect\n"
                     "• Account not approved\n"
@@ -1165,8 +1100,6 @@ async def handle_all_messages(message: types.Message):
                 return
             
             # Login successful
-            clear_login_attempts(uid)
-            
             user_data = user_row.iloc[0].to_dict()
             
             # Determine role (check if user is in admin list)
