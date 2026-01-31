@@ -9,14 +9,15 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
-from fastapi import FastAPI
-import uvicorn
 import os
 import json
 import pytz
 import uuid
 import time
 import unicodedata
+
+# -------- GLOBAL FLAGS --------
+BOT_STARTED = False
 
 def clean_text(value):
     if value is None:
@@ -50,20 +51,6 @@ STATUS_ACCEPTED = "ACCEPTED"
 STATUS_REJECTED = "REJECTED"
 STATUS_COMPLETED = "COMPLETED"
 STATUS_CLOSED = "CLOSED"
-
-
-# ---------------- FASTAPI SERVER ----------------
-
-app = FastAPI()
-
-@app.get("/")
-def home():
-    return {"status": "ok"}
-
-@app.get("/diamonds")
-def diamonds():
-    return {"message": "Supplier API integration coming soon 💎"}
-
 
 # ---------------- CONFIG ----------------
 
@@ -2791,7 +2778,14 @@ async def session_cleanup_loop():
 
 @app.on_event("startup")
 async def startup_event():
+    global BOT_STARTED
     import asyncio
+
+    if BOT_STARTED:
+        print("⚠️ Bot already running — skipping polling")
+        return
+
+    BOT_STARTED = True
     print("🤖 Telegram Bot starting...")
 
     load_sessions()
@@ -2801,16 +2795,11 @@ async def startup_event():
     except Exception as e:
         print("Webhook cleanup failed:", e)
 
-    # ✅ Start polling
     asyncio.create_task(dp.start_polling(bot))
+    asyncio.create_task(session_cleanup_loop())
 
-    # ✅ Session cleanup loop
-    if not hasattr(startup_event, "started"):
-        startup_event.started = True
-        asyncio.create_task(session_cleanup_loop())
-        print("✅ Bot polling started")
-    else:
-        print("⚠️ Bot already running — skipping duplicate polling")
+    print("✅ Bot polling started")
+
 
 
 # ---------------- RUN FASTAPI SERVER ----------------
