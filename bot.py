@@ -1,4 +1,3 @@
-# ONE COMMAND - Complete deployment (no GitHub needed)
 cd ~ && rm -rf diamond-bot && mkdir diamond-bot && cd diamond-bot && cat > bot.py << 'EOF'
 import asyncio
 import nest_asyncio
@@ -703,39 +702,4 @@ nest-asyncio==1.5.8
 pytz==2023.3.post1
 python-multipart==0.0.6
 EOF
- && cat > setup.py << 'EOF'
-import boto3
-import pandas as pd
-import os
-
-# Create S3 bucket
-bucket_name = "diamond-bot-" + boto3.client('sts').get_caller_identity()['Account']
-s3 = boto3.client('s3')
-
-try:
-    s3.create_bucket(
-        Bucket=bucket_name,
-        CreateBucketConfiguration={'LocationConstraint': 'ap-south-1'}
-    )
-    print(f"✅ Created S3 bucket: {bucket_name}")
-except:
-    print(f"✅ Using existing bucket: {bucket_name}")
-
-# Create admin account
-accounts = pd.DataFrame({
-    'USERNAME': ['prince'],
-    'PASSWORD': ['1234'],
-    'ROLE': ['admin'],
-    'APPROVED': ['YES']
-})
-
-accounts.to_excel('/tmp/accounts.xlsx', index=False)
-s3.upload_file('/tmp/accounts.xlsx', bucket_name, 'users/accounts.xlsx')
-print("✅ Created admin account: prince / 1234")
-
-# Set environment variable
-os.environ['AWS_BUCKET'] = bucket_name
-print(f"✅ Set AWS_BUCKET={bucket_name}")
-print("\n🎉 Setup complete! Run: python bot.py")
-EOF
- && pip install -r requirements.txt && python setup.py && echo "✅ Installation complete!" && echo "📢 IMPORTANT: Set your Telegram Bot Token:" && echo "export BOT_TOKEN='YOUR_BOT_TOKEN_FROM_BOTFATHER'" && echo "Then run: python bot.py"
+ && pip install -r requirements.txt && export BOT_TOKEN='7965048668:AAFcXQ1aktjGFDY-ZU85RJeF1i3mEHQkFZw' && python bot.py
