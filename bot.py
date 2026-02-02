@@ -50,11 +50,11 @@ STATUS_CLOSED = "CLOSED"
 def load_env_config():
     """Load and validate all environment variables"""
     config = {
-        "BOT_TOKEN": os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE"),
-        "AWS_ACCESS_KEY_ID": os.getenv("AWS_ACCESS_KEY_ID"),
-        "AWS_SECRET_ACCESS_KEY": os.getenv("AWS_SECRET_ACCESS_KEY"),
+        "BOT_TOKEN": os.getenv("BOT_TOKEN", "7965048668:AAFcXQ1aktjGFDY-ZU85RJeF1i3mEHQkFZw"),
+        "AWS_ACCESS_KEY_ID": os.getenv("AKIA3SFAMUMTHAGYC7AL"),
+        "AWS_SECRET_ACCESS_KEY": os.getenv("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"),
         "AWS_REGION": os.getenv("AWS_REGION", "ap-south-1"),
-        "AWS_BUCKET": os.getenv("AWS_BUCKET", "diamond-bot-123456"),
+        "AWS_BUCKET": os.getenv("AWS_BUCKET", "diamond-bucket-styleoflifes"),
         "PORT": int(os.getenv("PORT", "10000")),
         "PYTHON_VERSION": os.getenv("PYTHON_VERSION", "3.9"),
         "SESSION_TIMEOUT": int(os.getenv("SESSION_TIMEOUT", "3600")),
