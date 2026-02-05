@@ -5,7 +5,7 @@ import boto3
 import re
 from io import BytesIO
 from datetime import datetime, timedelta
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
@@ -20,6 +20,9 @@ import unicodedata
 import uvicorn
 from typing import Optional, Dict, Any, List
 import logging
+
+# Apply nest_asyncio for async compatibility
+nest_asyncio.apply()
 
 # -------- SETUP LOGGING --------
 logging.basicConfig(
@@ -55,10 +58,10 @@ def load_env_config():
         "AWS_BUCKET": os.getenv("AWS_BUCKET"),
         "PORT": int(os.getenv("PORT", "10000")),
         "PYTHON_VERSION": os.getenv("PYTHON_VERSION", "3.9"),
-        "SESSION_TIMEOUT": int(os.getenv("SESSION_TIMEOUT", "3600")),  # 1 hour
-        "RATE_LIMIT": int(os.getenv("RATE_LIMIT", "5")),  # messages per window
-        "RATE_LIMIT_WINDOW": int(os.getenv("RATE_LIMIT_WINDOW", "10")),  # seconds
-        "WEBHOOK_URL": os.getenv("WEBHOOK_URL", ""),  # Add webhook URL
+        "SESSION_TIMEOUT": int(os.getenv("SESSION_TIMEOUT", "3600")),
+        "RATE_LIMIT": int(os.getenv("RATE_LIMIT", "5")),
+        "RATE_LIMIT_WINDOW": int(os.getenv("RATE_LIMIT_WINDOW", "10")),
+        "WEBHOOK_URL": os.getenv("WEBHOOK_URL", ""),
     }
     
     # Validate required configurations
@@ -70,7 +73,11 @@ def load_env_config():
     
     # Auto-generate webhook URL if not set
     if not config["WEBHOOK_URL"]:
+        # This should be your actual Render/Heroku URL
         config["WEBHOOK_URL"] = f"https://telegram-bot-fill.onrender.com/webhook"
+    
+    logger.info(f"Config loaded: BOT_TOKEN present: {bool(config['BOT_TOKEN'])}")
+    logger.info(f"Webhook URL: {config['WEBHOOK_URL']}")
     
     return config
 
@@ -95,11 +102,18 @@ NOTIFICATIONS_FOLDER = "notifications/"
 SESSION_KEY = "sessions/logged_in_users.json"
 
 # -------- INITIALIZE AWS CLIENTS --------
-s3 = boto3.client("s3", **{k: v for k, v in AWS_CONFIG.items() if v})
+try:
+    s3 = boto3.client("s3", **{k: v for k, v in AWS_CONFIG.items() if v})
+    logger.info("✅ AWS S3 client initialized")
+except Exception as e:
+    logger.error(f"❌ Failed to initialize S3 client: {e}")
+    s3 = None
 
 # -------- INITIALIZE BOT --------
 bot = Bot(token=CONFIG["BOT_TOKEN"])
 dp = Dispatcher()
+router = Router()
+dp.include_router(router)
 
 # -------- GLOBAL DATA STORES --------
 logged_in_users = {}
@@ -151,14 +165,14 @@ def clean_text(value: Any) -> str:
     value = str(value)
     value = unicodedata.normalize("NFKC", value)
     value = value.replace("\u00A0", " ").replace("\u200B", "")
-    value = value.replace("\n", " ").replace("\r", " ")  # Replace newlines with spaces
-    value = re.sub(r"\s+", " ", value)  # Collapse multiple spaces
+    value = value.replace("\n", " ").replace("\r", " ")
+    value = re.sub(r"\s+", " ", value)
     return value.strip()
 
 def clean_password(val: Any) -> str:
     """Clean password, handling Excel .0 issue"""
     val = clean_text(val)
-    if val.endswith(".0"):  # Excel password issue
+    if val.endswith(".0"):
         val = val[:-2]
     return val
 
@@ -186,7 +200,6 @@ def is_admin(user: Optional[Dict[str, Any]]) -> bool:
     if not user:
         return False
     
-    # Get role from logged_in_users which was set from Excel during login
     role = normalize_text(user.get("ROLE", ""))
     return role == "admin"
 
@@ -196,14 +209,12 @@ def get_logged_user(uid: int) -> Optional[Dict[str, Any]]:
     if not user:
         return None
 
-    # Check session timeout
     last_active = user.get("last_active", 0)
     if time.time() - last_active > CONFIG["SESSION_TIMEOUT"]:
         logged_in_users.pop(uid, None)
         save_sessions()
         return None
 
-    # Update last active time
     user["last_active"] = time.time()
     return user
 
@@ -223,9 +234,9 @@ def save_sessions():
             Body=json.dumps(logged_in_users, default=str),
             ContentType="application/json"
         )
-        logger.info(f"Saved {len(logged_in_users)} active sessions")
+        logger.info(f"✅ Saved {len(logged_in_users)} active sessions")
     except Exception as e:
-        logger.error(f"Failed to save sessions: {e}")
+        logger.error(f"❌ Failed to save sessions: {e}")
 
 def load_sessions():
     """Load sessions from S3"""
@@ -234,9 +245,9 @@ def load_sessions():
         obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=SESSION_KEY)
         raw = json.loads(obj["Body"].read())
         logged_in_users = {int(k): v for k, v in raw.items()}
-        logger.info(f"Loaded {len(logged_in_users)} sessions from S3")
+        logger.info(f"✅ Loaded {len(logged_in_users)} sessions from S3")
     except Exception as e:
-        logger.warning(f"No existing sessions or error loading: {e}")
+        logger.warning(f"⚠️ No existing sessions or error loading: {e}")
         logged_in_users = {}
 
 def cleanup_sessions():
@@ -271,7 +282,7 @@ def is_rate_limited(uid: int) -> bool:
         return True
     
     history.append(now)
-    user_rate_limit[uid] = history[-10:]  # Keep last 10 timestamps
+    user_rate_limit[uid] = history[-10:]
     return False
 
 # -------- DATA LOADING/SAVING --------
@@ -282,7 +293,6 @@ def load_accounts() -> pd.DataFrame:
         s3.download_file(CONFIG["AWS_BUCKET"], ACCOUNTS_KEY, local_path)
         df = pd.read_excel(local_path, dtype=str)
         
-        # Clean columns
         required_cols = ["USERNAME", "PASSWORD", "ROLE", "APPROVED"]
         for col in required_cols:
             if col not in df.columns:
@@ -290,33 +300,30 @@ def load_accounts() -> pd.DataFrame:
             
             df[col] = df[col].fillna("").astype(str).apply(clean_text)
         
-        # Clean passwords (handle Excel .0 issue)
         df["PASSWORD"] = df["PASSWORD"].apply(clean_password)
         
-        # Log loaded accounts (without passwords for security)
-        logger.info(f"Loaded {len(df)} accounts from S3")
+        logger.info(f"✅ Loaded {len(df)} accounts from S3")
         logger.info(f"Account roles: {df['ROLE'].unique().tolist()}")
         
         return df
         
     except Exception as e:
-        logger.error(f"Failed to load accounts: {e}")
-        # Return empty dataframe - no default accounts
+        logger.error(f"❌ Failed to load accounts: {e}")
         return pd.DataFrame(columns=["USERNAME", "PASSWORD", "ROLE", "APPROVED"])
 
 def save_accounts(df: pd.DataFrame):
     """Save accounts to Excel file in S3"""
     if READ_ONLY_ACCOUNTS:
-        logger.warning("Accounts file is READ ONLY. Skipping save.")
+        logger.warning("⚠️ Accounts file is READ ONLY. Skipping save.")
         return
     
     try:
         local_path = "/tmp/accounts.xlsx"
         df.to_excel(local_path, index=False)
         s3.upload_file(local_path, CONFIG["AWS_BUCKET"], ACCOUNTS_KEY)
-        logger.info(f"Saved {len(df)} accounts to S3")
+        logger.info(f"✅ Saved {len(df)} accounts to S3")
     except Exception as e:
-        logger.error(f"Failed to save accounts: {e}")
+        logger.error(f"❌ Failed to save accounts: {e}")
     finally:
         if os.path.exists(local_path):
             os.remove(local_path)
@@ -327,10 +334,10 @@ def load_stock() -> pd.DataFrame:
         local_path = "/tmp/all_suppliers_stock.xlsx"
         s3.download_file(CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY, local_path)
         df = pd.read_excel(local_path)
-        logger.info(f"Loaded {len(df)} stock items from S3")
+        logger.info(f"✅ Loaded {len(df)} stock items from S3")
         return df
     except Exception as e:
-        logger.warning(f"Failed to load stock: {e}")
+        logger.warning(f"⚠️ Failed to load stock: {e}")
         return pd.DataFrame()
 
 # -------- ACTIVITY LOGGING --------
@@ -350,7 +357,6 @@ def log_activity(user: Dict[str, Any], action: str, details: Optional[Dict] = No
         
         key = f"{ACTIVITY_LOG_FOLDER}{log_entry['date']}/{log_entry['login_id']}.json"
         
-        # Try to load existing logs
         try:
             obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=key)
             data = json.loads(obj["Body"].read())
@@ -359,7 +365,6 @@ def log_activity(user: Dict[str, Any], action: str, details: Optional[Dict] = No
         
         data.append(log_entry)
         
-        # Save to S3
         s3.put_object(
             Bucket=CONFIG["AWS_BUCKET"],
             Key=key,
@@ -367,10 +372,10 @@ def log_activity(user: Dict[str, Any], action: str, details: Optional[Dict] = No
             ContentType="application/json"
         )
         
-        logger.info(f"Logged activity: {user.get('USERNAME')} - {action}")
+        logger.info(f"📝 Logged activity: {user.get('USERNAME')} - {action}")
         
     except Exception as e:
-        logger.error(f"Failed to log activity: {e}")
+        logger.error(f"❌ Failed to log activity: {e}")
 
 def generate_activity_excel() -> Optional[str]:
     """Generate Excel report of all activities"""
@@ -416,11 +421,11 @@ def generate_activity_excel() -> Optional[str]:
         path = "/tmp/user_activity_report.xlsx"
         df.to_excel(path, index=False)
         
-        logger.info(f"Generated activity report with {len(rows)} entries")
+        logger.info(f"✅ Generated activity report with {len(rows)} entries")
         return path
 
     except Exception as e:
-        logger.error(f"Activity report error: {e}")
+        logger.error(f"❌ Activity report error: {e}")
         return None
 
 # -------- NOTIFICATION SYSTEM --------
@@ -429,21 +434,18 @@ def save_notification(username: str, role: str, message: str):
     try:
         key = f"{NOTIFICATIONS_FOLDER}{role}_{username}.json"
         
-        # Load existing notifications
         try:
             obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=key)
             data = json.loads(obj["Body"].read())
         except:
             data = []
         
-        # Add new notification
         data.append({
             "message": message,
             "time": datetime.now(IST).strftime("%Y-%m-%d %H:%M"),
             "read": False
         })
         
-        # Save to S3
         s3.put_object(
             Bucket=CONFIG["AWS_BUCKET"],
             Key=key,
@@ -452,7 +454,7 @@ def save_notification(username: str, role: str, message: str):
         )
         
     except Exception as e:
-        logger.error(f"Failed to save notification: {e}")
+        logger.error(f"❌ Failed to save notification: {e}")
 
 def fetch_unread_notifications(username: str, role: str) -> List[Dict]:
     """Fetch unread notifications for user"""
@@ -463,11 +465,9 @@ def fetch_unread_notifications(username: str, role: str) -> List[Dict]:
         
         unread = [n for n in data if not n.get("read")]
         
-        # Mark as read
         for n in data:
             n["read"] = True
         
-        # Save updated data
         s3.put_object(
             Bucket=CONFIG["AWS_BUCKET"],
             Key=key,
@@ -506,7 +506,6 @@ def rebuild_combined_stock():
                 df["SUPPLIER"] = key.split("/")[-1].replace(".xlsx", "").lower()
                 dfs.append(df)
                 
-                # Clean up temp file
                 if os.path.exists(local_path):
                     os.remove(local_path)
                     
@@ -517,10 +516,8 @@ def rebuild_combined_stock():
         if not dfs:
             return
         
-        # Combine all dataframes
         final_df = pd.concat(dfs, ignore_index=True)
         
-        # Define desired columns
         desired_columns = [
             "Stock #", "Availability", "Shape", "Weight", "Color", "Clarity", "Cut", "Polish", "Symmetry",
             "Fluorescence Color", "Measurements", "Shade", "Milky", "Eye Clean", "Lab", "Report #", "Location",
@@ -532,7 +529,6 @@ def rebuild_combined_stock():
             "SUPPLIER", "LOCKED", "Diamond Type"
         ]
         
-        # Add missing columns
         for col in desired_columns:
             if col not in final_df.columns:
                 final_df[col] = ""
@@ -543,19 +539,17 @@ def rebuild_combined_stock():
         final_df["LOCKED"] = final_df.get("LOCKED", "NO")
         final_df = final_df[desired_columns]
         
-        # Save to local file and upload to S3
         local_path = "/tmp/all_suppliers_stock.xlsx"
         final_df.to_excel(local_path, index=False)
         s3.upload_file(local_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
         
-        logger.info(f"Rebuilt combined stock with {len(final_df)} items from {len(dfs)} suppliers")
+        logger.info(f"✅ Rebuilt combined stock with {len(final_df)} items from {len(dfs)} suppliers")
         
-        # Clean up
         if os.path.exists(local_path):
             os.remove(local_path)
             
     except Exception as e:
-        logger.error(f"Error rebuilding combined stock: {e}")
+        logger.error(f"❌ Error rebuilding combined stock: {e}")
 
 def atomic_lock_stone(stone_id: str) -> bool:
     """Atomically lock a stone to prevent race conditions"""
@@ -567,24 +561,19 @@ def atomic_lock_stone(stone_id: str) -> bool:
         if df.empty or "Stock #" not in df.columns or "LOCKED" not in df.columns:
             return False
         
-        # Check if stone exists and is not locked
         mask = (df["Stock #"] == stone_id) & (df["LOCKED"] != "YES")
         if not mask.any():
             return False
         
-        # Lock the stone
         df.loc[mask, "LOCKED"] = "YES"
         
-        # Prevent formula injection
         for col in df.select_dtypes(include="object"):
             df[col] = df[col].map(safe_excel)
         
-        # Save changes
         temp_path = "/tmp/locked_stock.xlsx"
         df.to_excel(temp_path, index=False)
         s3.upload_file(temp_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
         
-        # Also update in supplier's individual file
         stone_row = df[df["Stock #"] == stone_id].iloc[0]
         supplier = stone_row.get("SUPPLIER", "")
         
@@ -597,7 +586,6 @@ def atomic_lock_stone(stone_id: str) -> bool:
                 if "Stock #" in supplier_df.columns and "LOCKED" in supplier_df.columns:
                     supplier_df.loc[supplier_df["Stock #"] == stone_id, "LOCKED"] = "YES"
                     
-                    # Prevent formula injection
                     for col in supplier_df.select_dtypes(include="object"):
                         supplier_df[col] = supplier_df[col].map(safe_excel)
                     
@@ -606,16 +594,15 @@ def atomic_lock_stone(stone_id: str) -> bool:
             except Exception as e:
                 logger.error(f"Failed to update supplier file: {e}")
         
-        # Clean up temp files
         for path in [local_path, temp_path, "/tmp/supplier_stock.xlsx"]:
             if os.path.exists(path):
                 os.remove(path)
         
-        logger.info(f"Locked stone: {stone_id}")
+        logger.info(f"✅ Locked stone: {stone_id}")
         return True
         
     except Exception as e:
-        logger.error(f"Atomic lock failed for stone {stone_id}: {e}")
+        logger.error(f"❌ Atomic lock failed for stone {stone_id}: {e}")
         return False
 
 def unlock_stone(stone_id: str):
@@ -628,10 +615,8 @@ def unlock_stone(stone_id: str):
         if "Stock #" not in df.columns or "LOCKED" not in df.columns:
             return
         
-        # Unlock the stone
         df.loc[df["Stock #"] == stone_id, "LOCKED"] = "NO"
         
-        # Save to combined stock
         temp_path = "/tmp/all_suppliers_stock.xlsx"
         for col in df.select_dtypes(include="object"):
             df[col] = df[col].map(safe_excel)
@@ -639,7 +624,6 @@ def unlock_stone(stone_id: str):
         df.to_excel(temp_path, index=False)
         s3.upload_file(temp_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
         
-        # Also update in supplier's file
         stone_row = df[df["Stock #"] == stone_id].iloc[0]
         supplier = stone_row.get("SUPPLIER", "")
         
@@ -656,20 +640,18 @@ def unlock_stone(stone_id: str):
             except:
                 pass
         
-        # Clean up
         for path in [temp_path, "/tmp/supplier_stock.xlsx"]:
             if os.path.exists(path):
                 os.remove(path)
         
-        logger.info(f"Unlocked stone: {stone_id}")
+        logger.info(f"✅ Unlocked stone: {stone_id}")
         
     except Exception as e:
-        logger.error(f"Failed to unlock stone {stone_id}: {e}")
+        logger.error(f"❌ Failed to unlock stone {stone_id}: {e}")
 
 def remove_stone_from_supplier_and_combined(stone_id: str):
     """Remove stone from both supplier and combined stock"""
     try:
-        # Remove from combined stock
         df = load_stock()
         if not df.empty and "Stock #" in df.columns:
             df = df[df["Stock #"] != stone_id]
@@ -681,7 +663,6 @@ def remove_stone_from_supplier_and_combined(stone_id: str):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
         
-        # Remove from supplier's individual file
         objs = s3.list_objects_v2(
             Bucket=CONFIG["AWS_BUCKET"],
             Prefix=SUPPLIER_STOCK_FOLDER
@@ -702,10 +683,10 @@ def remove_stone_from_supplier_and_combined(stone_id: str):
                 s3.upload_file(local_path, CONFIG["AWS_BUCKET"], key)
                 break
         
-        logger.info(f"Removed stone {stone_id} from all stock files")
+        logger.info(f"✅ Removed stone {stone_id} from all stock files")
         
     except Exception as e:
-        logger.error(f"Failed to remove stone {stone_id}: {e}")
+        logger.error(f"❌ Failed to remove stone {stone_id}: {e}")
 
 # -------- DEAL MANAGEMENT --------
 def log_deal_history(deal: Dict[str, Any]):
@@ -713,7 +694,6 @@ def log_deal_history(deal: Dict[str, Any]):
     try:
         local_path = "/tmp/deal_history.xlsx"
         
-        # Try to load existing history
         try:
             s3.download_file(CONFIG["AWS_BUCKET"], DEAL_HISTORY_KEY, local_path)
             df = pd.read_excel(local_path)
@@ -723,7 +703,6 @@ def log_deal_history(deal: Dict[str, Any]):
                 "Offer Price", "Supplier Action", "Admin Action", "Final Status", "Created At"
             ])
         
-        # Add new deal entry
         new_row = pd.DataFrame([{
             "Deal ID": deal.get("deal_id"),
             "Stone ID": deal.get("stone_id"),
@@ -741,10 +720,10 @@ def log_deal_history(deal: Dict[str, Any]):
         df.to_excel(local_path, index=False)
         s3.upload_file(local_path, CONFIG["AWS_BUCKET"], DEAL_HISTORY_KEY)
         
-        logger.info(f"Logged deal to history: {deal.get('deal_id')}")
+        logger.info(f"✅ Logged deal to history: {deal.get('deal_id')}")
         
     except Exception as e:
-        logger.error(f"Failed to log deal history: {e}")
+        logger.error(f"❌ Failed to log deal history: {e}")
     finally:
         if os.path.exists(local_path):
             os.remove(local_path)
@@ -755,10 +734,10 @@ async def session_cleanup_loop():
     while True:
         try:
             cleanup_sessions()
-            logger.debug("Session cleanup completed")
+            logger.debug("✅ Session cleanup completed")
         except Exception as e:
-            logger.error(f"Session cleanup error: {e}")
-        await asyncio.sleep(600)  # Run every 10 minutes
+            logger.error(f"❌ Session cleanup error: {e}")
+        await asyncio.sleep(600)
 
 async def user_state_cleanup_loop():
     """Background task to clean up old user states"""
@@ -769,19 +748,19 @@ async def user_state_cleanup_loop():
             
             for uid, state in list(user_state.items()):
                 last_active = state.get("last_updated", 0)
-                if now - last_active > 1800:  # 30 minutes
+                if now - last_active > 1800:
                     stale_users.append(uid)
             
             for uid in stale_users:
                 user_state.pop(uid, None)
             
             if stale_users:
-                logger.info(f"Cleaned up {len(stale_users)} stale user states")
+                logger.info(f"✅ Cleaned up {len(stale_users)} stale user states")
                 
         except Exception as e:
-            logger.error(f"User state cleanup error: {e}")
+            logger.error(f"❌ User state cleanup error: {e}")
         
-        await asyncio.sleep(300)  # Run every 5 minutes
+        await asyncio.sleep(300)
 
 # -------- LIFESPAN MANAGER --------
 @asynccontextmanager
@@ -796,12 +775,20 @@ async def lifespan(app: FastAPI):
         # Load sessions
         load_sessions()
         
-        # Set webhook for Render
-        await bot.set_webhook(CONFIG["WEBHOOK_URL"], drop_pending_updates=True)
-        logger.info(f"✅ Webhook set to: {CONFIG['WEBHOOK_URL']}")
+        # Set webhook
+        webhook_url = CONFIG["WEBHOOK_URL"]
+        if webhook_url:
+            await bot.set_webhook(
+                url=webhook_url,
+                drop_pending_updates=True,
+                allowed_updates=dp.resolve_used_update_types()
+            )
+            logger.info(f"✅ Webhook set to: {webhook_url}")
+        else:
+            logger.warning("⚠️ No webhook URL set, using polling")
         
     except Exception as e:
-        logger.error(f"Startup error: {e}")
+        logger.error(f"❌ Startup error: {e}")
     
     BOT_STARTED = True
     
@@ -816,8 +803,22 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("🤖 Diamond Trading Bot shutting down...")
     
+    # Remove webhook
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("✅ Webhook removed")
+    except Exception as e:
+        logger.error(f"❌ Failed to remove webhook: {e}")
+    
     # Save sessions before shutdown
     save_sessions()
+    
+    # Close bot session
+    try:
+        await bot.session.close()
+        logger.info("✅ Bot session closed")
+    except Exception as e:
+        logger.error(f"❌ Error closing bot session: {e}")
     
     BOT_STARTED = False
     logger.info("✅ Bot shutdown complete")
@@ -859,19 +860,29 @@ async def telegram_webhook(request: Request):
     """Handle Telegram webhook updates"""
     try:
         update_data = await request.json()
+        logger.info(f"📨 Received webhook update type: {update_data.get('update_id')}")
+        
         telegram_update = types.Update(**update_data)
         await dp.feed_update(bot=bot, update=telegram_update)
         return {"status": "ok"}
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
+        logger.error(f"❌ Webhook error: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/setwebhook")
 async def set_webhook_endpoint():
     """Manual endpoint to set webhook (for testing)"""
     try:
-        await bot.set_webhook(CONFIG["WEBHOOK_URL"], drop_pending_updates=True)
-        return {"status": "success", "webhook_url": CONFIG["WEBHOOK_URL"]}
+        webhook_url = CONFIG["WEBHOOK_URL"]
+        if not webhook_url:
+            return {"status": "error", "error": "No webhook URL configured"}
+        
+        await bot.set_webhook(
+            url=webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=dp.resolve_used_update_types()
+        )
+        return {"status": "success", "webhook_url": webhook_url}
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
@@ -884,22 +895,41 @@ async def delete_webhook_endpoint():
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
+@app.get("/test")
+async def test_bot():
+    """Test if bot can send messages"""
+    try:
+        # Send a test message
+        test_chat_id = os.getenv("TEST_CHAT_ID", "123456789")  # Set your chat ID
+        await bot.send_message(
+            chat_id=int(test_chat_id),
+            text="🤖 Bot is working! Test message."
+        )
+        return {"status": "success", "message": "Test message sent"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
 # -------- COMMAND HANDLERS --------
 @dp.message(Command("start"))
 async def start(message: types.Message):
     """Handle /start command"""
-    await message.reply(
-        "💎 Welcome to Diamond Trading Bot!\n\n"
-        "Use /login to sign in\n"
-        "Use /createaccount to register\n"
-        "Use /help for assistance",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
+    try:
+        await message.reply(
+            "💎 Welcome to Diamond Trading Bot!\n\n"
+            "Use /login to sign in\n"
+            "Use /createaccount to register\n"
+            "Use /help for assistance",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        logger.info(f"✅ /start command handled for user {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"❌ Error in /start handler: {e}")
 
 @dp.message(Command("help"))
 async def help_command(message: types.Message):
     """Handle /help command"""
-    help_text = """
+    try:
+        help_text = """
 🤖 **Diamond Trading Bot Help**
 
 **Commands:**
@@ -916,299 +946,293 @@ async def help_command(message: types.Message):
 
 **Need help?** Contact system administrator.
 """
-    await message.reply(help_text)
+        await message.reply(help_text)
+        logger.info(f"✅ /help command handled for user {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"❌ Error in /help handler: {e}")
 
 @dp.message(Command("createaccount"))
 async def create_account(message: types.Message):
     """Start account creation process"""
-    uid = message.from_user.id
-    
-    if is_rate_limited(uid):
-        await message.reply("⏳ Please wait before creating another account.")
-        return
-    
-    user_state[uid] = {
-        "step": "create_username",
-        "last_updated": time.time()
-    }
-    
-    await message.reply(
-        "📝 **Account Creation**\n\n"
-        "Enter your desired username (minimum 3 characters):"
-    )
+    try:
+        uid = message.from_user.id
+        
+        if is_rate_limited(uid):
+            await message.reply("⏳ Please wait before creating another account.")
+            return
+        
+        user_state[uid] = {
+            "step": "create_username",
+            "last_updated": time.time()
+        }
+        
+        await message.reply(
+            "📝 **Account Creation**\n\n"
+            "Enter your desired username (minimum 3 characters):"
+        )
+        logger.info(f"✅ Account creation started for user {uid}")
+    except Exception as e:
+        logger.error(f"❌ Error in create_account handler: {e}")
 
 @dp.message(Command("login"))
 async def login_command(message: types.Message):
     """Start login process"""
-    uid = message.from_user.id
-    
-    if is_rate_limited(uid):
-        await message.reply("⏳ Please wait before trying to login again.")
-        return
-    
-    # Check if already logged in
-    user = get_logged_user(uid)
-    if user:
-        await message.reply(
-            f"ℹ️ You're already logged in as {user['USERNAME']}.\n"
-            "Use /logout to sign out first."
-        )
-        return
-    
-    # Clear any existing state and start new login
-    user_state.pop(uid, None)
-    user_state[uid] = {
-        "step": "login_username",
-        "last_updated": time.time()
-    }
-    
-    await message.reply("👤 Enter your username:")
+    try:
+        uid = message.from_user.id
+        
+        if is_rate_limited(uid):
+            await message.reply("⏳ Please wait before trying to login again.")
+            return
+        
+        # Check if already logged in
+        user = get_logged_user(uid)
+        if user:
+            await message.reply(
+                f"ℹ️ You're already logged in as {user['USERNAME']}.\n"
+                "Use /logout to sign out first."
+            )
+            return
+        
+        # Start new login
+        user_state[uid] = {
+            "step": "login_username",
+            "last_updated": time.time()
+        }
+        
+        await message.reply("👤 Enter your username:")
+        logger.info(f"✅ Login started for user {uid}")
+    except Exception as e:
+        logger.error(f"❌ Error in login_command handler: {e}")
 
 @dp.message(Command("logout"))
 async def logout_command(message: types.Message):
     """Handle /logout command"""
-    uid = message.from_user.id
-    user = get_logged_user(uid)
-    
-    if not user:
-        await message.reply("ℹ️ You are not logged in.")
-        return
-    
-    # Log activity
-    log_activity(user, "LOGOUT")
-    
-    # Remove from logged in users
-    logged_in_users.pop(uid, None)
-    user_state.pop(uid, None)
-    save_sessions()
-    
-    await message.reply(
-        "✅ Successfully logged out.\n"
-        "Use /login to sign in again.",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
+    try:
+        uid = message.from_user.id
+        user = get_logged_user(uid)
+        
+        if not user:
+            await message.reply("ℹ️ You are not logged in.")
+            return
+        
+        log_activity(user, "LOGOUT")
+        
+        logged_in_users.pop(uid, None)
+        user_state.pop(uid, None)
+        save_sessions()
+        
+        await message.reply(
+            "✅ Successfully logged out.\n"
+            "Use /login to sign in again.",
+            reply_markup=types.ReplyKeyboardRemove()
+        )
+        logger.info(f"✅ User {user['USERNAME']} logged out")
+    except Exception as e:
+        logger.error(f"❌ Error in logout_command handler: {e}")
 
 @dp.message(Command("reset"))
 async def reset_state_command(message: types.Message):
     """Reset user state"""
-    uid = message.from_user.id
-    user_state.pop(uid, None)
-    await message.reply("✅ Login state reset. Use /login to start again.")
+    try:
+        uid = message.from_user.id
+        user_state.pop(uid, None)
+        await message.reply("✅ Login state reset. Use /login to start again.")
+        logger.info(f"✅ User state reset for user {uid}")
+    except Exception as e:
+        logger.error(f"❌ Error in reset_state_command handler: {e}")
 
-# -------- ACCOUNT CREATION FLOW --------
-@dp.message(F.text.in_(["🔐 login", "login"]))
-async def start_login_button(message: types.Message):
-    """Handle login button press"""
-    await login_command(message)
-
+# -------- STATE HANDLER --------
 @dp.message()
 async def handle_all_messages(message: types.Message):
-    """Main message handler"""
-    uid = message.from_user.id
-    
-    # Rate limiting
-    if is_rate_limited(uid):
-        await message.reply("⏳ Too many messages. Please slow down.")
-        return
-    
-    # Update session activity if logged in
-    user = get_logged_user(uid)
-    if user:
-        touch_session(uid)
-    
-    # Handle state-based flows
-    state = user_state.get(uid)
-    if state:
-        state["last_updated"] = time.time()
+    """Main message handler for state-based flows"""
+    try:
+        uid = message.from_user.id
+        text = message.text.strip()
         
-        # Account creation flow
-        if state.get("step") == "create_username":
-            username = message.text.strip()
+        logger.info(f"📩 Received message from {uid}: {text}")
+        
+        # Rate limiting
+        if is_rate_limited(uid):
+            await message.reply("⏳ Too many messages. Please slow down.")
+            return
+        
+        # Update session activity if logged in
+        user = get_logged_user(uid)
+        if user:
+            touch_session(uid)
+        
+        # Handle state-based flows
+        state = user_state.get(uid)
+        if state:
+            state["last_updated"] = time.time()
             
-            if len(username) < 3:
-                await message.reply("❌ Username must be at least 3 characters.")
+            # Account creation flow
+            if state.get("step") == "create_username":
+                username = text
+                
+                if len(username) < 3:
+                    await message.reply("❌ Username must be at least 3 characters.")
+                    return
+                
+                df = load_accounts()
+                if not df[df["USERNAME"].str.lower() == username.lower()].empty:
+                    await message.reply("❌ Username already exists.")
+                    user_state.pop(uid, None)
+                    return
+                
+                state["username"] = username
+                state["step"] = "create_password"
+                
+                await message.reply("🔐 Enter password (minimum 4 characters):")
                 return
             
-            # Check if username exists
-            df = load_accounts()
-            if not df[df["USERNAME"].str.lower() == username.lower()].empty:
-                await message.reply("❌ Username already exists.")
+            elif state.get("step") == "create_password":
+                password = text
+                
+                if len(password) < 4:
+                    await message.reply("❌ Password must be at least 4 characters.")
+                    return
+                
+                username = state["username"]
+                
+                df = load_accounts()
+                new_row = {
+                    "USERNAME": username,
+                    "PASSWORD": clean_password(password),
+                    "ROLE": "client",
+                    "APPROVED": "NO"
+                }
+                
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                save_accounts(df)
+                
                 user_state.pop(uid, None)
-                return
-            
-            state["username"] = username
-            state["step"] = "create_password"
-            
-            await message.reply("🔐 Enter password (minimum 4 characters):")
-            return
-        
-        elif state.get("step") == "create_password":
-            password = message.text.strip()
-            
-            if len(password) < 4:
-                await message.reply("❌ Password must be at least 4 characters.")
-                return
-            
-            username = state["username"]
-            
-            # Create new account
-            df = load_accounts()
-            new_row = {
-                "USERNAME": username,
-                "PASSWORD": clean_password(password),
-                "ROLE": "client",  # Default role for new users
-                "APPROVED": "NO"   # Needs admin approval
-            }
-            
-            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-            save_accounts(df)
-            
-            user_state.pop(uid, None)
-            
-            await message.reply(
-                "✅ Account created successfully!\n\n"
-                "⏳ Your account is pending admin approval.\n"
-                "You'll be notified once approved.\n\n"
-                "Use /login after approval."
-            )
-            
-            # Notify admins
-            admin_df = df[df["ROLE"].str.lower() == "admin"]
-            for _, admin in admin_df.iterrows():
-                save_notification(
-                    admin["USERNAME"],
-                    "admin",
-                    f"📝 New account pending approval: {username}"
-                )
-            
-            return
-        
-        # Login flow
-        elif state.get("step") == "login_username":
-            username = message.text.strip()
-            state["login_username"] = username
-            state["step"] = "login_password"
-            
-            await message.reply("🔐 Enter password:")
-            return
-        
-        elif state.get("step") == "login_password":
-            password = message.text.strip()
-            username = state.get("login_username", "")
-            
-            # Debug logging
-            logger.info(f"Login attempt - Username entered: '{username}'")
-            
-            # Validate login
-            df = load_accounts()
-            
-            if df.empty:
-                logger.error("No accounts found in database")
-                await message.reply("❌ No accounts found in system.")
-                user_state.pop(uid, None)
-                return
-            
-            # Clean and normalize data
-            df["USERNAME"] = df["USERNAME"].apply(clean_text)
-            df["PASSWORD"] = df["PASSWORD"].apply(clean_password)
-            df["APPROVED"] = df["APPROVED"].apply(clean_text).str.upper()
-            df["ROLE"] = df["ROLE"].apply(clean_text).str.lower()
-            
-            username_clean = clean_text(username)
-            password_clean = clean_password(password)
-            
-            logger.info(f"Cleaned username: '{username_clean}'")
-            logger.info(f"Accounts in DB: {df[['USERNAME', 'ROLE', 'APPROVED']].to_dict('records')}")
-            
-            # Find matching user
-            user_row = df[
-                (df["USERNAME"].str.lower() == username_clean.lower()) &
-                (df["PASSWORD"] == password_clean) &
-                (df["APPROVED"] == "YES")
-            ]
-            
-            if user_row.empty:
-                logger.warning(f"Login failed for username: {username_clean}")
-                logger.warning(f"Matching check:")
-                logger.warning(f"- Username match: {(df['USERNAME'].str.lower() == username_clean.lower()).any()}")
-                logger.warning(f"- Password match: {(df['PASSWORD'] == password_clean).any()}")
-                logger.warning(f"- Approved check: {(df['APPROVED'] == 'YES').any()}")
                 
                 await message.reply(
-                    "❌ Invalid login credentials\n\n"
-                    "Possible reasons:\n"
-                    "• Username/password incorrect\n"
-                    "• Account not approved by admin\n"
-                    "• Account doesn't exist\n\n"
-                    "Please check your credentials and try again."
+                    "✅ Account created successfully!\n\n"
+                    "⏳ Your account is pending admin approval.\n"
+                    "You'll be notified once approved.\n\n"
+                    "Use /login after approval."
                 )
+                
+                admin_df = df[df["ROLE"].str.lower() == "admin"]
+                for _, admin in admin_df.iterrows():
+                    save_notification(
+                        admin["USERNAME"],
+                        "admin",
+                        f"📝 New account pending approval: {username}"
+                    )
+                
+                log_activity({"USERNAME": username, "ROLE": "client", "TELEGRAM_ID": uid}, "ACCOUNT_CREATED")
+                return
+            
+            # Login flow
+            elif state.get("step") == "login_username":
+                username = text
+                state["login_username"] = username
+                state["step"] = "login_password"
+                
+                await message.reply("🔐 Enter password:")
+                return
+            
+            elif state.get("step") == "login_password":
+                password = text
+                username = state.get("login_username", "")
+                
+                df = load_accounts()
+                
+                if df.empty:
+                    await message.reply("❌ No accounts found in system.")
+                    user_state.pop(uid, None)
+                    return
+                
+                df["USERNAME"] = df["USERNAME"].apply(clean_text)
+                df["PASSWORD"] = df["PASSWORD"].apply(clean_password)
+                df["APPROVED"] = df["APPROVED"].apply(clean_text).str.upper()
+                df["ROLE"] = df["ROLE"].apply(clean_text).str.lower()
+                
+                username_clean = clean_text(username)
+                password_clean = clean_password(password)
+                
+                user_row = df[
+                    (df["USERNAME"].str.lower() == username_clean.lower()) &
+                    (df["PASSWORD"] == password_clean) &
+                    (df["APPROVED"] == "YES")
+                ]
+                
+                if user_row.empty:
+                    await message.reply(
+                        "❌ Invalid login credentials\n\n"
+                        "Possible reasons:\n"
+                        "• Username/password incorrect\n"
+                        "• Account not approved by admin\n"
+                        "• Account doesn't exist\n\n"
+                        "Please check your credentials and try again."
+                    )
+                    user_state.pop(uid, None)
+                    return
+                
+                user_data = user_row.iloc[0].to_dict()
+                role = user_data["ROLE"].lower()
+                
+                logged_in_users[uid] = {
+                    "USERNAME": user_data["USERNAME"],
+                    "ROLE": role,
+                    "SUPPLIER_KEY": f"supplier_{user_data['USERNAME'].lower()}" if role == "supplier" else None,
+                    "last_active": time.time()
+                }
+                save_sessions()
+                
+                log_activity(logged_in_users[uid], "LOGIN")
+                
+                if role == "admin":
+                    kb = admin_kb
+                    welcome_msg = f"👑 Welcome Admin {user_data['USERNAME']}"
+                elif role == "supplier":
+                    kb = supplier_kb
+                    welcome_msg = f"💎 Welcome Supplier {user_data['USERNAME']}"
+                else:
+                    kb = client_kb
+                    welcome_msg = f"🥂 Welcome {user_data['USERNAME']}"
+                
+                await message.reply(welcome_msg, reply_markup=kb)
+                
+                notifications = fetch_unread_notifications(user_data["USERNAME"], role)
+                if notifications:
+                    note_msg = "🔔 **Unread Notifications**\n\n"
+                    for note in notifications[:5]:
+                        note_msg += f"• {note['message']}\n   🕒 {note['time']}\n\n"
+                    
+                    if len(notifications) > 5:
+                        note_msg += f"... and {len(notifications) - 5} more\n"
+                    
+                    await message.reply(note_msg)
+                
                 user_state.pop(uid, None)
                 return
             
-            # Login successful - Get role from Excel
-            user_data = user_row.iloc[0].to_dict()
-            role = user_data["ROLE"].lower()
+            # Diamond search flow
+            elif state.get("step", "").startswith("search_"):
+                await handle_search_flow(message, state)
+                return
             
-            logger.info(f"User {username_clean} logged in with role: {role} (from Excel)")
-            
-            # Store user session
-            logged_in_users[uid] = {
-                "USERNAME": user_data["USERNAME"],
-                "ROLE": role,
-                "SUPPLIER_KEY": f"supplier_{user_data['USERNAME'].lower()}" if role == "supplier" else None,
-                "last_active": time.time()
-            }
-            save_sessions()
-            
-            # Log activity
-            log_activity(logged_in_users[uid], "LOGIN")
-            
-            # Determine keyboard based on role from Excel
-            if role == "admin":
-                kb = admin_kb
-                welcome_msg = f"👑 Welcome Admin {user_data['USERNAME']}"
-            elif role == "supplier":
-                kb = supplier_kb
-                welcome_msg = f"💎 Welcome Supplier {user_data['USERNAME']}"
-            else:  # client or any other role
-                kb = client_kb
-                welcome_msg = f"🥂 Welcome {user_data['USERNAME']}"
-            
-            await message.reply(welcome_msg, reply_markup=kb)
-            
-            # Check for notifications
-            notifications = fetch_unread_notifications(user_data["USERNAME"], role)
-            if notifications:
-                note_msg = "🔔 **Unread Notifications**\n\n"
-                for note in notifications[:5]:
-                    note_msg += f"• {note['message']}\n   🕒 {note['time']}\n\n"
-                
-                if len(notifications) > 5:
-                    note_msg += f"... and {len(notifications) - 5} more\n"
-                
-                await message.reply(note_msg)
-            
-            user_state.pop(uid, None)
-            return
+            # Deal request flow
+            elif state.get("step", "").startswith("deal_"):
+                await handle_deal_flow(message, state)
+                return
         
-        # Diamond search flow
-        elif state.get("step", "").startswith("search_"):
-            await handle_search_flow(message, state)
-            return
-        
-        # Deal request flow
-        elif state.get("step", "").startswith("deal_"):
-            await handle_deal_flow(message, state)
-            return
-    
-    # Handle button presses for logged in users
-    if user:
-        await handle_logged_in_buttons(message, user)
-    else:
-        await message.reply(
-            "🔒 Please login first using /login\n"
-            "Or create an account using /createaccount"
-        )
+        # Handle button presses for logged in users
+        if user:
+            await handle_logged_in_buttons(message, user)
+        else:
+            await message.reply(
+                "🔒 Please login first using /login\n"
+                "Or create an account using /createaccount"
+            )
+            
+    except Exception as e:
+        logger.error(f"❌ Error in handle_all_messages: {e}", exc_info=True)
+        await message.reply("❌ An error occurred. Please try again.")
 
 # -------- SEARCH FLOW HANDLER --------
 async def handle_search_flow(message: types.Message, state: Dict):
@@ -1236,7 +1260,6 @@ async def handle_search_flow(message: types.Message, state: Dict):
     elif current_step == "search_clarity":
         search["clarity"] = text
         
-        # Perform search
         user = get_logged_user(uid)
         if not user:
             await message.reply("❌ Session expired. Please login again.")
@@ -1249,7 +1272,6 @@ async def handle_search_flow(message: types.Message, state: Dict):
             user_state.pop(uid, None)
             return
         
-        # Apply filters
         filtered_df = df.copy()
         
         # Carat filter
@@ -1298,12 +1320,10 @@ async def handle_search_flow(message: types.Message, state: Dict):
             user_state.pop(uid, None)
             return
         
-        # Show results
         total_diamonds = len(filtered_df)
         total_carats = filtered_df["Weight"].sum()
         
         if total_diamonds > 10:
-            # Send as Excel file
             excel_path = "/tmp/search_results.xlsx"
             filtered_df.to_excel(excel_path, index=False)
             
@@ -1323,7 +1343,6 @@ async def handle_search_flow(message: types.Message, state: Dict):
             if os.path.exists(excel_path):
                 os.remove(excel_path)
         else:
-            # Send individual messages
             for _, row in filtered_df.iterrows():
                 msg = (
                     f"💎 **{row['Stock #']}**\n"
@@ -1337,7 +1356,6 @@ async def handle_search_flow(message: types.Message, state: Dict):
                 )
                 await message.reply(msg)
         
-        # Log activity
         log_activity(user, "SEARCH", {
             "filters": search,
             "results": total_diamonds
@@ -1375,7 +1393,6 @@ async def handle_deal_flow(message: types.Message, state: Dict):
         
         stone_id = state["stone_id"]
         
-        # Check stone availability
         df = load_stock()
         stone_row = df[df["Stock #"] == stone_id]
         
@@ -1389,7 +1406,6 @@ async def handle_deal_flow(message: types.Message, state: Dict):
             user_state.pop(uid, None)
             return
         
-        # Create deal
         deal_id = f"DEAL-{uuid.uuid4().hex[:10].upper()}"
         stone_data = stone_row.iloc[0]
         
@@ -1406,13 +1422,11 @@ async def handle_deal_flow(message: types.Message, state: Dict):
             "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
         }
         
-        # Lock the stone
         if not atomic_lock_stone(stone_id):
             await message.reply("🔒 Stone is no longer available.")
             user_state.pop(uid, None)
             return
         
-        # Save deal to S3
         deal_key = f"{DEALS_FOLDER}{deal_id}.json"
         s3.put_object(
             Bucket=CONFIG["AWS_BUCKET"],
@@ -1421,10 +1435,8 @@ async def handle_deal_flow(message: types.Message, state: Dict):
             ContentType="application/json"
         )
         
-        # Log deal history
         log_deal_history(deal)
         
-        # Notify supplier
         save_notification(
             deal["supplier_username"],
             "supplier",
@@ -1432,7 +1444,6 @@ async def handle_deal_flow(message: types.Message, state: Dict):
             f"💰 Offer: ${offer_price}/ct"
         )
         
-        # Log activity
         log_activity(user, "REQUEST_DEAL", {
             "stone_id": stone_id,
             "offer_price": offer_price,
@@ -1453,279 +1464,313 @@ async def handle_deal_flow(message: types.Message, state: Dict):
 # -------- LOGGED IN BUTTON HANDLERS --------
 async def handle_logged_in_buttons(message: types.Message, user: Dict):
     """Handle button presses for logged in users"""
-    text = message.text
-    role = user.get("ROLE", "").lower()
-    
-    # Admin buttons
-    if role == "admin":
-        if text == "💎 View All Stock":
-            await view_all_stock(message, user)
-        elif text == "👥 View Users":
-            await view_users(message, user)
-        elif text == "⏳ Pending Accounts":
-            await pending_accounts(message, user)
-        elif text == "🏆 Supplier Leaderboard":
-            await supplier_leaderboard(message, user)
-        elif text == "🤝 View Deals":
-            await view_deals(message, user)
-        elif text == "📑 User Activity Report":
-            await user_activity_report(message, user)
-        elif text == "🗑 Delete Supplier Stock":
-            await delete_supplier_stock(message, user)
-        elif text == "🚪 Logout":
-            await logout_command(message)
+    try:
+        text = message.text
+        role = user.get("ROLE", "").lower()
+        
+        logger.info(f"Button pressed: {text} by {user['USERNAME']} (role: {role})")
+        
+        # Admin buttons
+        if role == "admin":
+            if text == "💎 View All Stock":
+                await view_all_stock(message, user)
+            elif text == "👥 View Users":
+                await view_users(message, user)
+            elif text == "⏳ Pending Accounts":
+                await pending_accounts(message, user)
+            elif text == "🏆 Supplier Leaderboard":
+                await supplier_leaderboard(message, user)
+            elif text == "🤝 View Deals":
+                await view_deals(message, user)
+            elif text == "📑 User Activity Report":
+                await user_activity_report(message, user)
+            elif text == "🗑 Delete Supplier Stock":
+                await delete_supplier_stock(message, user)
+            elif text == "🚪 Logout":
+                await logout_command(message)
+            else:
+                await message.reply("Please use the menu buttons.")
+        
+        # Supplier buttons
+        elif role == "supplier":
+            if text == "📤 Upload Excel":
+                await upload_excel_prompt(message, user)
+            elif text == "📦 My Stock":
+                await supplier_my_stock(message, user)
+            elif text == "📊 My Analytics":
+                await supplier_analytics(message, user)
+            elif text == "🤝 View Deals":
+                await view_deals(message, user)
+            elif text == "📥 Download Sample Excel":
+                await download_sample_excel(message, user)
+            elif text == "🚪 Logout":
+                await logout_command(message)
+            else:
+                await message.reply("Please use the menu buttons.")
+        
+        # Client buttons
         else:
-            await message.reply("Please use the menu buttons.")
-    
-    # Supplier buttons
-    elif role == "supplier":
-        if text == "📤 Upload Excel":
-            await upload_excel_prompt(message, user)
-        elif text == "📦 My Stock":
-            await supplier_my_stock(message, user)
-        elif text == "📊 My Analytics":
-            await supplier_analytics(message, user)
-        elif text == "🤝 View Deals":
-            await view_deals(message, user)
-        elif text == "📥 Download Sample Excel":
-            await download_sample_excel(message, user)
-        elif text == "🚪 Logout":
-            await logout_command(message)
-        else:
-            await message.reply("Please use the menu buttons.")
-    
-    # Client buttons - Default for everyone else
-    else:
-        if text == "💎 Search Diamonds":
-            await search_diamonds_start(message, user)
-        elif text == "🔥 Smart Deals":
-            await smart_deals(message, user)
-        elif text == "🤝 Request Deal":
-            await request_deal_start(message, user)
-        elif text == "🚪 Logout":
-            await logout_command(message)
-        else:
-            await message.reply("Please use the menu buttons.")
+            if text == "💎 Search Diamonds":
+                await search_diamonds_start(message, user)
+            elif text == "🔥 Smart Deals":
+                await smart_deals(message, user)
+            elif text == "🤝 Request Deal":
+                await request_deal_start(message, user)
+            elif text == "🚪 Logout":
+                await logout_command(message)
+            else:
+                await message.reply("Please use the menu buttons.")
+                
+    except Exception as e:
+        logger.error(f"❌ Error in handle_logged_in_buttons: {e}", exc_info=True)
+        await message.reply("❌ An error occurred. Please try again.")
 
 # -------- ADMIN HANDLERS --------
 async def view_all_stock(message: types.Message, user: Dict):
     """Admin: View all stock"""
-    df = load_stock()
-    
-    if df.empty:
-        await message.reply("❌ No stock available.")
-        return
-    
-    total_diamonds = len(df)
-    total_carats = df["Weight"].sum()
-    total_value = (df["Weight"] * df["Price Per Carat"]).sum()
-    
-    # Send summary
-    summary = (
-        f"📊 **Stock Summary**\n\n"
-        f"💎 Total Diamonds: {total_diamonds}\n"
-        f"⚖️ Total Carats: {total_carats:.2f}\n"
-        f"💰 Estimated Value: ${total_value:,.2f}\n"
-        f"👥 Suppliers: {df['SUPPLIER'].nunique()}\n\n"
-        f"**Top Shapes:**\n"
-    )
-    
-    shape_counts = df["Shape"].value_counts().head(5)
-    for shape, count in shape_counts.items():
-        summary += f"• {shape}: {count}\n"
-    
-    await message.reply(summary)
-    
-    # Send Excel file
-    excel_path = "/tmp/all_stock.xlsx"
-    df.to_excel(excel_path, index=False)
-    
-    await message.reply_document(
-        types.FSInputFile(excel_path),
-        caption=f"📊 Complete Stock List ({total_diamonds} diamonds)"
-    )
-    
-    if os.path.exists(excel_path):
-        os.remove(excel_path)
-    
-    log_activity(user, "VIEW_ALL_STOCK")
+    try:
+        df = load_stock()
+        
+        if df.empty:
+            await message.reply("❌ No stock available.")
+            return
+        
+        total_diamonds = len(df)
+        total_carats = df["Weight"].sum()
+        total_value = (df["Weight"] * df["Price Per Carat"]).sum()
+        
+        summary = (
+            f"📊 **Stock Summary**\n\n"
+            f"💎 Total Diamonds: {total_diamonds}\n"
+            f"⚖️ Total Carats: {total_carats:.2f}\n"
+            f"💰 Estimated Value: ${total_value:,.2f}\n"
+            f"👥 Suppliers: {df['SUPPLIER'].nunique()}\n\n"
+            f"**Top Shapes:**\n"
+        )
+        
+        shape_counts = df["Shape"].value_counts().head(5)
+        for shape, count in shape_counts.items():
+            summary += f"• {shape}: {count}\n"
+        
+        await message.reply(summary)
+        
+        excel_path = "/tmp/all_stock.xlsx"
+        df.to_excel(excel_path, index=False)
+        
+        await message.reply_document(
+            types.FSInputFile(excel_path),
+            caption=f"📊 Complete Stock List ({total_diamonds} diamonds)"
+        )
+        
+        if os.path.exists(excel_path):
+            os.remove(excel_path)
+        
+        log_activity(user, "VIEW_ALL_STOCK")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in view_all_stock: {e}")
+        await message.reply("❌ Failed to load stock data.")
 
 async def view_users(message: types.Message, user: Dict):
     """Admin: View all users"""
-    df = load_accounts()
-    
-    if df.empty:
-        await message.reply("❌ No users found.")
-        return
-    
-    # Group by role and approval status
-    role_stats = df.groupby("ROLE").size()
-    approval_stats = df.groupby("APPROVED").size()
-    
-    stats_msg = (
-        f"📊 **User Statistics**\n\n"
-        f"👥 Total Users: {len(df)}\n\n"
-        f"**By Role:**\n"
-    )
-    
-    for role, count in role_stats.items():
-        stats_msg += f"• {role.title()}: {count}\n"
-    
-    stats_msg += f"\n**By Approval Status:**\n"
-    for status, count in approval_stats.items():
-        stats_msg += f"• {status}: {count}\n"
-    
-    await message.reply(stats_msg)
-    
-    # Send Excel file
-    excel_path = "/tmp/all_users.xlsx"
-    df.to_excel(excel_path, index=False)
-    
-    await message.reply_document(
-        types.FSInputFile(excel_path),
-        caption=f"👥 User List ({len(df)} users)"
-    )
-    
-    if os.path.exists(excel_path):
-        os.remove(excel_path)
-    
-    log_activity(user, "VIEW_USERS")
+    try:
+        df = load_accounts()
+        
+        if df.empty:
+            await message.reply("❌ No users found.")
+            return
+        
+        role_stats = df.groupby("ROLE").size()
+        approval_stats = df.groupby("APPROVED").size()
+        
+        stats_msg = (
+            f"📊 **User Statistics**\n\n"
+            f"👥 Total Users: {len(df)}\n\n"
+            f"**By Role:**\n"
+        )
+        
+        for role, count in role_stats.items():
+            stats_msg += f"• {role.title()}: {count}\n"
+        
+        stats_msg += f"\n**By Approval Status:**\n"
+        for status, count in approval_stats.items():
+            stats_msg += f"• {status}: {count}\n"
+        
+        await message.reply(stats_msg)
+        
+        excel_path = "/tmp/all_users.xlsx"
+        df.to_excel(excel_path, index=False)
+        
+        await message.reply_document(
+            types.FSInputFile(excel_path),
+            caption=f"👥 User List ({len(df)} users)"
+        )
+        
+        if os.path.exists(excel_path):
+            os.remove(excel_path)
+        
+        log_activity(user, "VIEW_USERS")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in view_users: {e}")
+        await message.reply("❌ Failed to load user data.")
 
 async def pending_accounts(message: types.Message, user: Dict):
     """Admin: View pending accounts"""
-    df = load_accounts()
-    
-    pending_df = df[df["APPROVED"] != "YES"]
-    
-    if pending_df.empty:
-        await message.reply("✅ No pending accounts.")
-        return
-    
-    for _, row in pending_df.iterrows():
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="✅ Approve", callback_data=f"approve:{row['USERNAME']}"),
-            InlineKeyboardButton(text="❌ Reject", callback_data=f"reject:{row['USERNAME']}")
-        ]])
+    try:
+        df = load_accounts()
         
-        await message.reply(
-            f"👤 **Username:** {row['USERNAME']}\n"
-            f"🔑 **Role:** {row['ROLE']}\n"
-            f"⏳ **Status:** Pending Approval",
-            reply_markup=kb
-        )
-    
-    log_activity(user, "VIEW_PENDING_ACCOUNTS")
+        pending_df = df[df["APPROVED"] != "YES"]
+        
+        if pending_df.empty:
+            await message.reply("✅ No pending accounts.")
+            return
+        
+        for _, row in pending_df.iterrows():
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Approve", callback_data=f"approve:{row['USERNAME']}"),
+                InlineKeyboardButton(text="❌ Reject", callback_data=f"reject:{row['USERNAME']}")
+            ]])
+            
+            await message.reply(
+                f"👤 **Username:** {row['USERNAME']}\n"
+                f"🔑 **Role:** {row['ROLE']}\n"
+                f"⏳ **Status:** Pending Approval",
+                reply_markup=kb
+            )
+        
+        log_activity(user, "VIEW_PENDING_ACCOUNTS")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in pending_accounts: {e}")
+        await message.reply("❌ Failed to load pending accounts.")
 
 async def supplier_leaderboard(message: types.Message, user: Dict):
     """Admin: Supplier leaderboard"""
-    df = load_stock()
-    
-    if df.empty or "SUPPLIER" not in df.columns:
-        await message.reply("❌ No supplier data available.")
-        return
-    
-    # Calculate supplier statistics
-    supplier_stats = df.groupby("SUPPLIER").agg(
-        Stones=("SUPPLIER", "count"),
-        Total_Carats=("Weight", "sum"),
-        Avg_Price_Per_Carat=("Price Per Carat", "mean"),
-        Total_Value=("Weight", lambda x: (x * df.loc[x.index, "Price Per Carat"]).sum())
-    ).round(2)
-    
-    supplier_stats = supplier_stats.sort_values("Stones", ascending=False)
-    
-    # Create message
-    leaderboard_msg = "🏆 **Supplier Leaderboard**\n\n"
-    
-    for i, (supplier, stats) in enumerate(supplier_stats.head(10).iterrows(), 1):
-        supplier_name = supplier.replace("supplier_", "").title()
-        leaderboard_msg += (
-            f"{i}. **{supplier_name}**\n"
-            f"   💎 Stones: {stats['Stones']}\n"
-            f"   ⚖️ Carats: {stats['Total_Carats']:.2f}\n"
-            f"   💰 Avg Price: ${stats['Avg_Price_Per_Carat']:,.2f}/ct\n"
-            f"   🏦 Total Value: ${stats['Total_Value']:,.2f}\n\n"
+    try:
+        df = load_stock()
+        
+        if df.empty or "SUPPLIER" not in df.columns:
+            await message.reply("❌ No supplier data available.")
+            return
+        
+        supplier_stats = df.groupby("SUPPLIER").agg(
+            Stones=("SUPPLIER", "count"),
+            Total_Carats=("Weight", "sum"),
+            Avg_Price_Per_Carat=("Price Per Carat", "mean"),
+            Total_Value=("Weight", lambda x: (x * df.loc[x.index, "Price Per Carat"]).sum())
+        ).round(2)
+        
+        supplier_stats = supplier_stats.sort_values("Stones", ascending=False)
+        
+        leaderboard_msg = "🏆 **Supplier Leaderboard**\n\n"
+        
+        for i, (supplier, stats) in enumerate(supplier_stats.head(10).iterrows(), 1):
+            supplier_name = supplier.replace("supplier_", "").title()
+            leaderboard_msg += (
+                f"{i}. **{supplier_name}**\n"
+                f"   💎 Stones: {stats['Stones']}\n"
+                f"   ⚖️ Carats: {stats['Total_Carats']:.2f}\n"
+                f"   💰 Avg Price: ${stats['Avg_Price_Per_Carat']:,.2f}/ct\n"
+                f"   🏦 Total Value: ${stats['Total_Value']:,.2f}\n\n"
+            )
+        
+        await message.reply(leaderboard_msg)
+        
+        excel_path = "/tmp/supplier_leaderboard.xlsx"
+        supplier_stats.to_excel(excel_path)
+        
+        await message.reply_document(
+            types.FSInputFile(excel_path),
+            caption="📊 Supplier Leaderboard Details"
         )
-    
-    await message.reply(leaderboard_msg)
-    
-    # Send Excel file
-    excel_path = "/tmp/supplier_leaderboard.xlsx"
-    supplier_stats.to_excel(excel_path)
-    
-    await message.reply_document(
-        types.FSInputFile(excel_path),
-        caption="📊 Supplier Leaderboard Details"
-    )
-    
-    if os.path.exists(excel_path):
-        os.remove(excel_path)
-    
-    log_activity(user, "VIEW_SUPPLIER_LEADERBOARD")
+        
+        if os.path.exists(excel_path):
+            os.remove(excel_path)
+        
+        log_activity(user, "VIEW_SUPPLIER_LEADERBOARD")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in supplier_leaderboard: {e}")
+        await message.reply("❌ Failed to load supplier data.")
 
 async def user_activity_report(message: types.Message, user: Dict):
     """Admin: Generate activity report"""
-    excel_path = generate_activity_excel()
-    
-    if not excel_path:
-        await message.reply("❌ No activity logs found.")
-        return
-    
-    await message.reply_document(
-        types.FSInputFile(excel_path),
-        caption="📑 User Activity Report"
-    )
-    
-    if os.path.exists(excel_path):
-        os.remove(excel_path)
-    
-    log_activity(user, "DOWNLOAD_ACTIVITY_REPORT")
+    try:
+        excel_path = generate_activity_excel()
+        
+        if not excel_path:
+            await message.reply("❌ No activity logs found.")
+            return
+        
+        await message.reply_document(
+            types.FSInputFile(excel_path),
+            caption="📑 User Activity Report"
+        )
+        
+        if os.path.exists(excel_path):
+            os.remove(excel_path)
+        
+        log_activity(user, "DOWNLOAD_ACTIVITY_REPORT")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in user_activity_report: {e}")
+        await message.reply("❌ Failed to generate activity report.")
 
 async def delete_supplier_stock(message: types.Message, user: Dict):
     """Admin: Delete all supplier stock (with confirmation)"""
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Yes, Delete All", callback_data="confirm_delete_stock"),
-        InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_delete")
-    ]])
-    
-    await message.reply(
-        "⚠️ **WARNING: This will delete ALL supplier stock files.**\n\n"
-        "This action cannot be undone.\n"
-        "Are you sure you want to continue?",
-        reply_markup=kb
-    )
+    try:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Yes, Delete All", callback_data="confirm_delete_stock"),
+            InlineKeyboardButton(text="❌ Cancel", callback_data="cancel_delete")
+        ]])
+        
+        await message.reply(
+            "⚠️ **WARNING: This will delete ALL supplier stock files.**\n\n"
+            "This action cannot be undone.\n"
+            "Are you sure you want to continue?",
+            reply_markup=kb
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error in delete_supplier_stock: {e}")
+        await message.reply("❌ An error occurred.")
 
 # -------- SUPPLIER HANDLERS --------
 async def upload_excel_prompt(message: types.Message, user: Dict):
     """Supplier: Prompt for Excel upload"""
-    await message.reply(
-        "📤 **Upload Stock Excel File**\n\n"
-        "Please send an Excel file with your diamond stock.\n\n"
-        "**Required Columns:**\n"
-        "• Stock # (Unique ID)\n"
-        "• Shape, Weight, Color, Clarity\n"
-        "• Price Per Carat\n"
-        "• Lab, Report #\n"
-        "• Diamond Type, Description\n\n"
-        "**File Requirements:**\n"
-        "• Max size: 10MB\n"
-        "• Format: .xlsx or .xls\n"
-        "• No duplicate Stock #\n\n"
-        "Send your file now or use '📥 Download Sample Excel' first."
-    )
+    try:
+        await message.reply(
+            "📤 **Upload Stock Excel File**\n\n"
+            "Please send an Excel file with your diamond stock.\n\n"
+            "**Required Columns:**\n"
+            "• Stock # (Unique ID)\n"
+            "• Shape, Weight, Color, Clarity\n"
+            "• Price Per Carat\n"
+            "• Lab, Report #\n"
+            "• Diamond Type, Description\n\n"
+            "**File Requirements:**\n"
+            "• Max size: 10MB\n"
+            "• Format: .xlsx or .xls\n"
+            "• No duplicate Stock #\n\n"
+            "Send your file now or use '📥 Download Sample Excel' first."
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error in upload_excel_prompt: {e}")
+        await message.reply("❌ An error occurred.")
 
 async def supplier_my_stock(message: types.Message, user: Dict):
     """Supplier: View own stock"""
-    supplier_key = user.get("SUPPLIER_KEY", f"supplier_{user['USERNAME'].lower()}")
-    stock_key = f"{SUPPLIER_STOCK_FOLDER}{supplier_key}.xlsx"
-    
     try:
+        supplier_key = user.get("SUPPLIER_KEY", f"supplier_{user['USERNAME'].lower()}")
+        stock_key = f"{SUPPLIER_STOCK_FOLDER}{supplier_key}.xlsx"
+        
         local_path = "/tmp/my_stock.xlsx"
         s3.download_file(CONFIG["AWS_BUCKET"], stock_key, local_path)
         
         df = pd.read_excel(local_path)
         
-        # Calculate statistics
         total_stones = len(df)
         total_carats = df["Weight"].sum()
         avg_price = df["Price Per Carat"].mean()
@@ -1747,342 +1792,352 @@ async def supplier_my_stock(message: types.Message, user: Dict):
         
         await message.reply(stats_msg)
         
-        # Send the file
         await message.reply_document(
             types.FSInputFile(local_path),
             caption=f"📦 Your Stock File ({total_stones} diamonds)"
         )
         
+        log_activity(user, "VIEW_MY_STOCK")
+        
     except Exception as e:
-        logger.error(f"Failed to load supplier stock: {e}")
+        logger.error(f"❌ Error in supplier_my_stock: {e}")
         await message.reply("❌ You haven't uploaded any stock yet.")
-    
     finally:
         if os.path.exists("/tmp/my_stock.xlsx"):
             os.remove("/tmp/my_stock.xlsx")
 
 async def supplier_analytics(message: types.Message, user: Dict):
     """Supplier: Price analytics"""
-    supplier_key = user.get("SUPPLIER_KEY", f"supplier_{user['USERNAME'].lower()}")
-    
-    # Load combined stock
-    df = load_stock()
-    if df.empty:
-        await message.reply("❌ No market data available.")
-        return
-    
-    # Filter supplier's stones
-    my_stones = df[df["SUPPLIER"].str.lower() == supplier_key.lower()]
-    
-    if my_stones.empty:
-        await message.reply("❌ You have no stones in the market.")
-        return
-    
-    # Calculate market comparison
-    results = []
-    
-    for _, stone in my_stones.iterrows():
-        # Find similar stones in market
-        similar = df[
-            (df["Shape"] == stone["Shape"]) &
-            (df["Color"] == stone["Color"]) &
-            (df["Clarity"] == stone["Clarity"]) &
-            (df["Diamond Type"] == stone.get("Diamond Type", "")) &
-            (abs(df["Weight"] - stone["Weight"]) <= 0.2)  # ±0.2 carat
-        ]
+    try:
+        supplier_key = user.get("SUPPLIER_KEY", f"supplier_{user['USERNAME'].lower()}")
         
-        if len(similar) > 1:  # Has comparable stones
-            market_avg = similar["Price Per Carat"].mean()
-            my_price = stone["Price Per Carat"]
-            price_diff = my_price - market_avg
-            price_diff_pct = (price_diff / market_avg * 100) if market_avg > 0 else 0
+        df = load_stock()
+        if df.empty:
+            await message.reply("❌ No market data available.")
+            return
+        
+        my_stones = df[df["SUPPLIER"].str.lower() == supplier_key.lower()]
+        
+        if my_stones.empty:
+            await message.reply("❌ You have no stones in the market.")
+            return
+        
+        results = []
+        
+        for _, stone in my_stones.iterrows():
+            similar = df[
+                (df["Shape"] == stone["Shape"]) &
+                (df["Color"] == stone["Color"]) &
+                (df["Clarity"] == stone["Clarity"]) &
+                (df["Diamond Type"] == stone.get("Diamond Type", "")) &
+                (abs(df["Weight"] - stone["Weight"]) <= 0.2)
+            ]
             
-            results.append({
-                "Stock #": stone["Stock #"],
-                "Weight": stone["Weight"],
-                "Shape": stone["Shape"],
-                "Color": stone["Color"],
-                "Clarity": stone["Clarity"],
-                "Your Price": my_price,
-                "Market Avg": market_avg,
-                "Price Diff": price_diff,
-                "Diff %": price_diff_pct,
-                "Status": "Above Market" if price_diff > 0 else "Below Market" if price_diff < 0 else "Market Average"
-            })
-    
-    if not results:
-        await message.reply("ℹ️ No comparable stones found in market for analysis.")
-        return
-    
-    # Create DataFrame and sort
-    results_df = pd.DataFrame(results)
-    results_df = results_df.sort_values("Diff %", ascending=False)
-    
-    # Generate summary
-    above_market = len(results_df[results_df["Diff %"] > 5])
-    below_market = len(results_df[results_df["Diff %"] < -5])
-    in_range = len(results_df) - above_market - below_market
-    
-    summary_msg = (
-        f"📊 **Price Analytics**\n\n"
-        f"📈 Analyzed {len(results_df)} comparable stones\n\n"
-        f"**Price Positioning:**\n"
-        f"• 📈 Above Market (>5%): {above_market}\n"
-        f"• 📉 Below Market (<-5%): {below_market}\n"
-        f"• ↔️ In Range: {in_range}\n\n"
-        f"**Recommendations:**\n"
-    )
-    
-    if above_market > below_market:
-        summary_msg += "• Consider adjusting prices down for competitive edge\n"
-    elif below_market > above_market:
-        summary_msg += "• Your prices are competitive, good position\n"
-    else:
-        summary_msg += "• Prices are well balanced with market\n"
-    
-    await message.reply(summary_msg)
-    
-    # Send detailed Excel
-    excel_path = "/tmp/price_analytics.xlsx"
-    results_df.to_excel(excel_path, index=False)
-    
-    await message.reply_document(
-        types.FSInputFile(excel_path),
-        caption=f"📊 Detailed Price Analysis ({len(results_df)} stones)"
-    )
-    
-    if os.path.exists(excel_path):
-        os.remove(excel_path)
-    
-    log_activity(user, "VIEW_ANALYTICS")
+            if len(similar) > 1:
+                market_avg = similar["Price Per Carat"].mean()
+                my_price = stone["Price Per Carat"]
+                price_diff = my_price - market_avg
+                price_diff_pct = (price_diff / market_avg * 100) if market_avg > 0 else 0
+                
+                results.append({
+                    "Stock #": stone["Stock #"],
+                    "Weight": stone["Weight"],
+                    "Shape": stone["Shape"],
+                    "Color": stone["Color"],
+                    "Clarity": stone["Clarity"],
+                    "Your Price": my_price,
+                    "Market Avg": market_avg,
+                    "Price Diff": price_diff,
+                    "Diff %": price_diff_pct,
+                    "Status": "Above Market" if price_diff > 0 else "Below Market" if price_diff < 0 else "Market Average"
+                })
+        
+        if not results:
+            await message.reply("ℹ️ No comparable stones found in market for analysis.")
+            return
+        
+        results_df = pd.DataFrame(results)
+        results_df = results_df.sort_values("Diff %", ascending=False)
+        
+        above_market = len(results_df[results_df["Diff %"] > 5])
+        below_market = len(results_df[results_df["Diff %"] < -5])
+        in_range = len(results_df) - above_market - below_market
+        
+        summary_msg = (
+            f"📊 **Price Analytics**\n\n"
+            f"📈 Analyzed {len(results_df)} comparable stones\n\n"
+            f"**Price Positioning:**\n"
+            f"• 📈 Above Market (>5%): {above_market}\n"
+            f"• 📉 Below Market (<-5%): {below_market}\n"
+            f"• ↔️ In Range: {in_range}\n\n"
+            f"**Recommendations:**\n"
+        )
+        
+        if above_market > below_market:
+            summary_msg += "• Consider adjusting prices down for competitive edge\n"
+        elif below_market > above_market:
+            summary_msg += "• Your prices are competitive, good position\n"
+        else:
+            summary_msg += "• Prices are well balanced with market\n"
+        
+        await message.reply(summary_msg)
+        
+        excel_path = "/tmp/price_analytics.xlsx"
+        results_df.to_excel(excel_path, index=False)
+        
+        await message.reply_document(
+            types.FSInputFile(excel_path),
+            caption=f"📊 Detailed Price Analysis ({len(results_df)} stones)"
+        )
+        
+        if os.path.exists(excel_path):
+            os.remove(excel_path)
+        
+        log_activity(user, "VIEW_ANALYTICS")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in supplier_analytics: {e}")
+        await message.reply("❌ Failed to load analytics data.")
 
 async def download_sample_excel(message: types.Message, user: Dict):
     """Supplier: Download sample Excel template"""
-    sample_data = {
-        "Stock #": ["D001", "D002", "D003"],
-        "Shape": ["Round", "Oval", "Princess"],
-        "Weight": [1.0, 1.5, 2.0],
-        "Color": ["D", "E", "F"],
-        "Clarity": ["VVS1", "VS1", "SI1"],
-        "Cut": ["Excellent", "Very Good", "Good"],
-        "Polish": ["Excellent", "Very Good", "Good"],
-        "Symmetry": ["Excellent", "Very Good", "Good"],
-        "Lab": ["GIA", "IGI", "HRD"],
-        "Report #": ["1234567890", "2345678901", "3456789012"],
-        "Price Per Carat": [10000, 8500, 7000],
-        "Total Price": [10000, 12750, 14000],
-        "Diamond Type": ["Natural", "Natural", "LGD"],
-        "Description": ["Excellent cut round", "Nice oval diamond", "Good princess cut"],
-        "Location": ["Mumbai", "Delhi", "Bangalore"],
-        "Availability": ["Available", "Available", "Available"]
-    }
-    
-    df = pd.DataFrame(sample_data)
-    
-    # Create Excel in memory
-    buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Stock')
+    try:
+        sample_data = {
+            "Stock #": ["D001", "D002", "D003"],
+            "Shape": ["Round", "Oval", "Princess"],
+            "Weight": [1.0, 1.5, 2.0],
+            "Color": ["D", "E", "F"],
+            "Clarity": ["VVS1", "VS1", "SI1"],
+            "Cut": ["Excellent", "Very Good", "Good"],
+            "Polish": ["Excellent", "Very Good", "Good"],
+            "Symmetry": ["Excellent", "Very Good", "Good"],
+            "Lab": ["GIA", "IGI", "HRD"],
+            "Report #": ["1234567890", "2345678901", "3456789012"],
+            "Price Per Carat": [10000, 8500, 7000],
+            "Total Price": [10000, 12750, 14000],
+            "Diamond Type": ["Natural", "Natural", "LGD"],
+            "Description": ["Excellent cut round", "Nice oval diamond", "Good princess cut"],
+            "Location": ["Mumbai", "Delhi", "Bangalore"],
+            "Availability": ["Available", "Available", "Available"]
+        }
         
-        # Add instructions sheet
-        instructions = pd.DataFrame({
-            "Column": [
-                "Stock #", "Shape", "Weight", "Color", "Clarity", 
-                "Price Per Carat", "Lab", "Report #", "Diamond Type", "Description"
-            ],
-            "Required": ["Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes"],
-            "Description": [
-                "Unique identifier for each diamond",
-                "Shape of diamond (Round, Oval, Princess, etc.)",
-                "Weight in carats (e.g., 1.0, 1.5)",
-                "Color grade (D, E, F, etc.)",
-                "Clarity grade (VVS1, VS1, SI1, etc.)",
-                "Price per carat in USD",
-                "Certification lab (GIA, IGI, HRD, etc.)",
-                "Certificate number",
-                "Type (Natural, LGD, HPHT)",
-                "Brief description of the diamond"
-            ],
-            "Example": ["D001", "Round", "1.0", "D", "VVS1", "10000", "GIA", "123456", "Natural", "Excellent cut"]
-        })
-        instructions.to_excel(writer, index=False, sheet_name='Instructions')
-    
-    buffer.seek(0)
-    
-    await message.reply_document(
-        BufferedInputFile(buffer.read(), filename="diamond_stock_template.xlsx"),
-        caption=(
-            "📥 **Sample Stock Upload Template**\n\n"
-            "This Excel file contains:\n"
-            "1. 📋 Sample data (3 diamonds)\n"
-            "2. 📝 Instructions sheet\n\n"
-            "**Important:**\n"
-            "• Fill in your actual diamond data\n"
-            "• Keep column names exactly as shown\n"
-            "• Stock # must be unique\n"
-            "• Remove sample rows before uploading"
+        df = pd.DataFrame(sample_data)
+        
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Stock')
+            
+            instructions = pd.DataFrame({
+                "Column": [
+                    "Stock #", "Shape", "Weight", "Color", "Clarity", 
+                    "Price Per Carat", "Lab", "Report #", "Diamond Type", "Description"
+                ],
+                "Required": ["Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes"],
+                "Description": [
+                    "Unique identifier for each diamond",
+                    "Shape of diamond (Round, Oval, Princess, etc.)",
+                    "Weight in carats (e.g., 1.0, 1.5)",
+                    "Color grade (D, E, F, etc.)",
+                    "Clarity grade (VVS1, VS1, SI1, etc.)",
+                    "Price per carat in USD",
+                    "Certification lab (GIA, IGI, HRD, etc.)",
+                    "Certificate number",
+                    "Type (Natural, LGD, HPHT)",
+                    "Brief description of the diamond"
+                ],
+                "Example": ["D001", "Round", "1.0", "D", "VVS1", "10000", "GIA", "123456", "Natural", "Excellent cut"]
+            })
+            instructions.to_excel(writer, index=False, sheet_name='Instructions')
+        
+        buffer.seek(0)
+        
+        await message.reply_document(
+            BufferedInputFile(buffer.read(), filename="diamond_stock_template.xlsx"),
+            caption=(
+                "📥 **Sample Stock Upload Template**\n\n"
+                "This Excel file contains:\n"
+                "1. 📋 Sample data (3 diamonds)\n"
+                "2. 📝 Instructions sheet\n\n"
+                "**Important:**\n"
+                "• Fill in your actual diamond data\n"
+                "• Keep column names exactly as shown\n"
+                "• Stock # must be unique\n"
+                "• Remove sample rows before uploading"
+            )
         )
-    )
+        
+        log_activity(user, "DOWNLOAD_SAMPLE_EXCEL")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in download_sample_excel: {e}")
+        await message.reply("❌ Failed to generate sample template.")
 
 # -------- CLIENT HANDLERS --------
 async def search_diamonds_start(message: types.Message, user: Dict):
     """Client: Start diamond search"""
-    user_state[message.from_user.id] = {
-        "step": "search_carat",
-        "search": {},
-        "last_updated": time.time()
-    }
-    
-    await message.reply(
-        "💎 **Diamond Search**\n\n"
-        "Enter the carat weight you're looking for:\n\n"
-        "**Examples:**\n"
-        "• 1.5 (for approximately 1.5 carat)\n"
-        "• 1-2 (for range 1 to 2 carats)\n"
-        "• any (for any carat weight)"
-    )
+    try:
+        user_state[message.from_user.id] = {
+            "step": "search_carat",
+            "search": {},
+            "last_updated": time.time()
+        }
+        
+        await message.reply(
+            "💎 **Diamond Search**\n\n"
+            "Enter the carat weight you're looking for:\n\n"
+            "**Examples:**\n"
+            "• 1.5 (for approximately 1.5 carat)\n"
+            "• 1-2 (for range 1 to 2 carats)\n"
+            "• any (for any carat weight)"
+        )
+        
+        log_activity(user, "START_SEARCH")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in search_diamonds_start: {e}")
+        await message.reply("❌ An error occurred. Please try again.")
 
 async def smart_deals(message: types.Message, user: Dict):
     """Client: Find smart deals (discounted diamonds)"""
-    df = load_stock()
-    
-    if df.empty:
-        await message.reply("❌ No diamonds available.")
-        return
-    
-    # Calculate market averages for comparison
-    df["Price Per Carat"] = pd.to_numeric(df["Price Per Carat"], errors="coerce")
-    df["Weight"] = pd.to_numeric(df["Weight"], errors="coerce")
-    
-    # Group by characteristics to find market average
-    group_cols = ["Shape", "Color", "Clarity", "Diamond Type"]
-    df["Market_Avg"] = df.groupby(group_cols)["Price Per Carat"].transform("median")
-    
-    # Calculate discount percentage
-    df["Discount_%"] = ((df["Market_Avg"] - df["Price Per Carat"]) / df["Market_Avg"] * 100).round(1)
-    
-    # Filter for good deals (at least 10% below market)
-    good_deals = df[df["Discount_%"] >= 10].sort_values("Discount_%", ascending=False)
-    
-    if good_deals.empty:
-        await message.reply("😔 No strong deals found right now.")
-        return
-    
-    # Show top deals
-    top_deals = good_deals.head(5)
-    
-    deals_msg = "🔥 **Smart Deals Found**\n\n"
-    deals_msg += f"Found {len(good_deals)} diamonds priced 10%+ below market\n\n"
-    
-    for i, (_, deal) in enumerate(top_deals.iterrows(), 1):
-        deals_msg += (
-            f"{i}. 💎 **{deal['Stock #']}**\n"
-            f"   📐 {deal['Shape']} | ⚖️ {deal['Weight']}ct\n"
-            f"   🎨 {deal['Color']} | ✨ {deal['Clarity']}\n"
-            f"   💰 ${deal['Price Per Carat']:,.0f}/ct\n"
-            f"   📉 {deal['Discount_%']}% below market\n"
-            f"   🔒 Status: {deal.get('LOCKED', 'NO')}\n\n"
-        )
-    
-    await message.reply(deals_msg)
-    
-    # Send full list if more than 5 deals
-    if len(good_deals) > 5:
-        excel_path = "/tmp/smart_deals.xlsx"
-        good_deals[["Stock #", "Shape", "Weight", "Color", "Clarity", "Price Per Carat", "Discount_%", "Lab"]].to_excel(excel_path, index=False)
+    try:
+        df = load_stock()
         
-        await message.reply_document(
-            types.FSInputFile(excel_path),
-            caption=f"📊 Complete Smart Deals List ({len(good_deals)} diamonds)"
-        )
+        if df.empty:
+            await message.reply("❌ No diamonds available.")
+            return
         
-        if os.path.exists(excel_path):
-            os.remove(excel_path)
-    
-    log_activity(user, "VIEW_SMART_DEALS")
+        df["Price Per Carat"] = pd.to_numeric(df["Price Per Carat"], errors="coerce")
+        df["Weight"] = pd.to_numeric(df["Weight"], errors="coerce")
+        
+        group_cols = ["Shape", "Color", "Clarity", "Diamond Type"]
+        df["Market_Avg"] = df.groupby(group_cols)["Price Per Carat"].transform("median")
+        
+        df["Discount_%"] = ((df["Market_Avg"] - df["Price Per Carat"]) / df["Market_Avg"] * 100).round(1)
+        
+        good_deals = df[df["Discount_%"] >= 10].sort_values("Discount_%", ascending=False)
+        
+        if good_deals.empty:
+            await message.reply("😔 No strong deals found right now.")
+            return
+        
+        top_deals = good_deals.head(5)
+        
+        deals_msg = "🔥 **Smart Deals Found**\n\n"
+        deals_msg += f"Found {len(good_deals)} diamonds priced 10%+ below market\n\n"
+        
+        for i, (_, deal) in enumerate(top_deals.iterrows(), 1):
+            deals_msg += (
+                f"{i}. 💎 **{deal['Stock #']}**\n"
+                f"   📐 {deal['Shape']} | ⚖️ {deal['Weight']}ct\n"
+                f"   🎨 {deal['Color']} | ✨ {deal['Clarity']}\n"
+                f"   💰 ${deal['Price Per Carat']:,.0f}/ct\n"
+                f"   📉 {deal['Discount_%']}% below market\n"
+                f"   🔒 Status: {deal.get('LOCKED', 'NO')}\n\n"
+            )
+        
+        await message.reply(deals_msg)
+        
+        if len(good_deals) > 5:
+            excel_path = "/tmp/smart_deals.xlsx"
+            good_deals[["Stock #", "Shape", "Weight", "Color", "Clarity", "Price Per Carat", "Discount_%", "Lab"]].to_excel(excel_path, index=False)
+            
+            await message.reply_document(
+                types.FSInputFile(excel_path),
+                caption=f"📊 Complete Smart Deals List ({len(good_deals)} diamonds)"
+            )
+            
+            if os.path.exists(excel_path):
+                os.remove(excel_path)
+        
+        log_activity(user, "VIEW_SMART_DEALS")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in smart_deals: {e}")
+        await message.reply("❌ Failed to load smart deals.")
 
 async def request_deal_start(message: types.Message, user: Dict):
     """Client: Start deal request process"""
-    df = load_stock()
-    
-    if df.empty:
-        await message.reply("❌ No diamonds available for deals.")
-        return
-    
-    # Check if there are many diamonds (use bulk mode)
-    if len(df) > 20:
-        # Provide bulk Excel template
-        template_df = pd.DataFrame(columns=["Stock #", "Offer Price ($/ct)"])
+    try:
+        df = load_stock()
         
-        # Add some available stones as examples
-        available_stones = df[df["LOCKED"] != "YES"].head(10)
-        for _, stone in available_stones.iterrows():
-            template_df = pd.concat([template_df, pd.DataFrame([{
-                "Stock #": stone["Stock #"],
-                "Offer Price ($/ct)": ""
-            }])], ignore_index=True)
-        
-        excel_path = "/tmp/deal_request_template.xlsx"
-        template_df.to_excel(excel_path, index=False)
-        
-        await message.reply_document(
-            types.FSInputFile(excel_path),
-            caption=(
-                "📊 **Bulk Deal Request Template**\n\n"
-                "**Instructions:**\n"
-                "1. Fill in your offer price for each stone\n"
-                "2. Save the file\n"
-                "3. Send it back to me\n\n"
-                "**Notes:**\n"
-                "• Only fill prices for stones you want\n"
-                "• Leave blank to skip\n"
-                "• Prices should be $ per carat\n"
-                "• Remove example rows if not needed"
-            )
-        )
-        
-        user_state[message.from_user.id] = {
-            "step": "bulk_deal_excel",
-            "last_updated": time.time()
-        }
-        
-        if os.path.exists(excel_path):
-            os.remove(excel_path)
-            
-    else:
-        # Individual deal mode
-        user_state[message.from_user.id] = {
-            "step": "deal_stone",
-            "last_updated": time.time()
-        }
-        
-        # Show available stones
-        available_stones = df[df["LOCKED"] != "YES"].head(5)
-        
-        if available_stones.empty:
-            await message.reply("❌ No stones available for deals at the moment.")
-            user_state.pop(message.from_user.id, None)
+        if df.empty:
+            await message.reply("❌ No diamonds available for deals.")
             return
         
-        stones_msg = "💎 **Available Stones for Deal**\n\n"
-        
-        for _, stone in available_stones.iterrows():
-            stones_msg += (
-                f"• **{stone['Stock #']}**\n"
-                f"  {stone['Shape']} | {stone['Weight']}ct\n"
-                f"  {stone['Color']} | {stone['Clarity']}\n"
-                f"  ${stone['Price Per Carat']:,.0f}/ct\n\n"
+        if len(df) > 20:
+            template_df = pd.DataFrame(columns=["Stock #", "Offer Price ($/ct)"])
+            
+            available_stones = df[df["LOCKED"] != "YES"].head(10)
+            for _, stone in available_stones.iterrows():
+                template_df = pd.concat([template_df, pd.DataFrame([{
+                    "Stock #": stone["Stock #"],
+                    "Offer Price ($/ct)": ""
+                }])], ignore_index=True)
+            
+            excel_path = "/tmp/deal_request_template.xlsx"
+            template_df.to_excel(excel_path, index=False)
+            
+            await message.reply_document(
+                types.FSInputFile(excel_path),
+                caption=(
+                    "📊 **Bulk Deal Request Template**\n\n"
+                    "**Instructions:**\n"
+                    "1. Fill in your offer price for each stone\n"
+                    "2. Save the file\n"
+                    "3. Send it back to me\n\n"
+                    "**Notes:**\n"
+                    "• Only fill prices for stones you want\n"
+                    "• Leave blank to skip\n"
+                    "• Prices should be $ per carat\n"
+                    "• Remove example rows if not needed"
+                )
             )
+            
+            user_state[message.from_user.id] = {
+                "step": "bulk_deal_excel",
+                "last_updated": time.time()
+            }
+            
+            if os.path.exists(excel_path):
+                os.remove(excel_path)
+                
+        else:
+            user_state[message.from_user.id] = {
+                "step": "deal_stone",
+                "last_updated": time.time()
+            }
+            
+            available_stones = df[df["LOCKED"] != "YES"].head(5)
+            
+            if available_stones.empty:
+                await message.reply("❌ No stones available for deals at the moment.")
+                user_state.pop(message.from_user.id, None)
+                return
+            
+            stones_msg = "💎 **Available Stones for Deal**\n\n"
+            
+            for _, stone in available_stones.iterrows():
+                stones_msg += (
+                    f"• **{stone['Stock #']}**\n"
+                    f"  {stone['Shape']} | {stone['Weight']}ct\n"
+                    f"  {stone['Color']} | {stone['Clarity']}\n"
+                    f"  ${stone['Price Per Carat']:,.0f}/ct\n\n"
+                )
+            
+            stones_msg += "Enter the **Stock #** of the stone you want to make an offer on:"
+            
+            await message.reply(stones_msg)
         
-        stones_msg += "Enter the **Stock #** of the stone you want to make an offer on:"
+        log_activity(user, "START_DEAL_REQUEST")
         
-        await message.reply(stones_msg)
+    except Exception as e:
+        logger.error(f"❌ Error in request_deal_start: {e}")
+        await message.reply("❌ Failed to load available stones.")
 
 # -------- DEAL VIEWING --------
 async def view_deals(message: types.Message, user: Dict):
     """View deals based on user role"""
     try:
-        # List all deal files
         objs = s3.list_objects_v2(
             Bucket=CONFIG["AWS_BUCKET"],
             Prefix=DEALS_FOLDER
@@ -2092,7 +2147,6 @@ async def view_deals(message: types.Message, user: Dict):
             await message.reply("ℹ️ No deals found.")
             return
         
-        # Load all deals
         deals = []
         for obj in objs["Contents"]:
             if not obj["Key"].endswith(".json"):
@@ -2114,20 +2168,16 @@ async def view_deals(message: types.Message, user: Dict):
             await message.reply("ℹ️ No deals available.")
             return
         
-        # Sort by creation date (newest first)
         deals.sort(key=lambda x: x.get("created_at", ""), reverse=True)
         
-        # Filter based on user role
         user_role = user["ROLE"]
         username = user["USERNAME"].lower()
         
         if user_role == "admin":
-            # Admin sees all deals
             filtered_deals = deals
             title = "All Deals"
             
         elif user_role == "supplier":
-            # Supplier sees their deals
             filtered_deals = [
                 d for d in deals 
                 if d.get("supplier_username", "").lower() == username
@@ -2135,7 +2185,6 @@ async def view_deals(message: types.Message, user: Dict):
             title = "Your Deals"
             
         elif user_role == "client":
-            # Client sees their deals
             filtered_deals = [
                 d for d in deals 
                 if d.get("client_username", "").lower() == username
@@ -2150,11 +2199,9 @@ async def view_deals(message: types.Message, user: Dict):
             await message.reply(f"ℹ️ No {title.lower()} found.")
             return
         
-        # Create summary
         summary_msg = f"🤝 **{title}**\n\n"
         summary_msg += f"Total: {len(filtered_deals)} deals\n\n"
         
-        # Count by status
         status_counts = {}
         for deal in filtered_deals:
             status = deal.get("final_status", "OPEN")
@@ -2165,7 +2212,6 @@ async def view_deals(message: types.Message, user: Dict):
         
         await message.reply(summary_msg)
         
-        # Send Excel file with details
         excel_data = []
         for deal in filtered_deals:
             excel_data.append({
@@ -2196,86 +2242,88 @@ async def view_deals(message: types.Message, user: Dict):
         log_activity(user, f"VIEW_{user_role.upper()}_DEALS")
         
     except Exception as e:
-        logger.error(f"Failed to view deals: {e}")
-        await message.reply("❌ Error loading deals. Please try again.")
+        logger.error(f"❌ Error in view_deals: {e}")
+        await message.reply("❌ Failed to load deals.")
 
 # -------- CALLBACK QUERY HANDLERS --------
 @dp.callback_query(F.data.startswith("approve:"))
 async def approve_user_callback(callback: types.CallbackQuery):
     """Approve pending user account"""
-    admin = get_logged_user(callback.from_user.id)
-    
-    if not is_admin(admin):
-        await callback.answer("❌ Admin only", show_alert=True)
-        return
-    
-    username = callback.data.split(":")[1]
-    
-    # Load accounts and approve
-    df = load_accounts()
-    
-    if df[df["USERNAME"] == username].empty:
-        await callback.answer("❌ User not found", show_alert=True)
-        return
-    
-    # Update approval status
-    df.loc[df["USERNAME"] == username, "APPROVED"] = "YES"
-    save_accounts(df)
-    
-    # Send notification to user
-    save_notification(username, "client", "✅ Your account has been approved by admin!")
-    
-    # Log activity
-    log_activity(admin, "APPROVE_USER", {"username": username})
-    
-    await callback.message.edit_text(
-        f"✅ **{username}** approved successfully!",
-        reply_markup=None
-    )
-    await callback.answer("Approved ✅")
+    try:
+        admin = get_logged_user(callback.from_user.id)
+        
+        if not is_admin(admin):
+            await callback.answer("❌ Admin only", show_alert=True)
+            return
+        
+        username = callback.data.split(":")[1]
+        
+        df = load_accounts()
+        
+        if df[df["USERNAME"] == username].empty:
+            await callback.answer("❌ User not found", show_alert=True)
+            return
+        
+        df.loc[df["USERNAME"] == username, "APPROVED"] = "YES"
+        save_accounts(df)
+        
+        save_notification(username, "client", "✅ Your account has been approved by admin!")
+        
+        log_activity(admin, "APPROVE_USER", {"username": username})
+        
+        await callback.message.edit_text(
+            f"✅ **{username}** approved successfully!",
+            reply_markup=None
+        )
+        await callback.answer("Approved ✅")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in approve_user_callback: {e}")
+        await callback.answer("❌ Error approving user", show_alert=True)
 
 @dp.callback_query(F.data.startswith("reject:"))
 async def reject_user_callback(callback: types.CallbackQuery):
     """Reject pending user account"""
-    admin = get_logged_user(callback.from_user.id)
-    
-    if not is_admin(admin):
-        await callback.answer("❌ Admin only", show_alert=True)
-        return
-    
-    username = callback.data.split(":")[1]
-    
-    # Load accounts and remove
-    df = load_accounts()
-    
-    if df[df["USERNAME"] == username].empty:
-        await callback.answer("❌ User not found", show_alert=True)
-        return
-    
-    # Remove user
-    df = df[df["USERNAME"] != username]
-    save_accounts(df)
-    
-    # Log activity
-    log_activity(admin, "REJECT_USER", {"username": username})
-    
-    await callback.message.edit_text(
-        f"❌ **{username}** rejected and removed.",
-        reply_markup=None
-    )
-    await callback.answer("Rejected ❌")
+    try:
+        admin = get_logged_user(callback.from_user.id)
+        
+        if not is_admin(admin):
+            await callback.answer("❌ Admin only", show_alert=True)
+            return
+        
+        username = callback.data.split(":")[1]
+        
+        df = load_accounts()
+        
+        if df[df["USERNAME"] == username].empty:
+            await callback.answer("❌ User not found", show_alert=True)
+            return
+        
+        df = df[df["USERNAME"] != username]
+        save_accounts(df)
+        
+        log_activity(admin, "REJECT_USER", {"username": username})
+        
+        await callback.message.edit_text(
+            f"❌ **{username}** rejected and removed.",
+            reply_markup=None
+        )
+        await callback.answer("Rejected ❌")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in reject_user_callback: {e}")
+        await callback.answer("❌ Error rejecting user", show_alert=True)
 
 @dp.callback_query(F.data == "confirm_delete_stock")
 async def confirm_delete_stock(callback: types.CallbackQuery):
     """Confirm and delete all supplier stock"""
-    admin = get_logged_user(callback.from_user.id)
-    
-    if not is_admin(admin):
-        await callback.answer("❌ Admin only", show_alert=True)
-        return
-    
     try:
-        # Delete all supplier files
+        admin = get_logged_user(callback.from_user.id)
+        
+        if not is_admin(admin):
+            await callback.answer("❌ Admin only", show_alert=True)
+            return
+        
         objs = s3.list_objects_v2(
             Bucket=CONFIG["AWS_BUCKET"],
             Prefix=SUPPLIER_STOCK_FOLDER
@@ -2287,13 +2335,11 @@ async def confirm_delete_stock(callback: types.CallbackQuery):
                 s3.delete_object(Bucket=CONFIG["AWS_BUCKET"], Key=obj["Key"])
                 deleted_count += 1
         
-        # Delete combined stock
         try:
             s3.delete_object(Bucket=CONFIG["AWS_BUCKET"], Key=COMBINED_STOCK_KEY)
         except:
             pass
         
-        # Log activity
         log_activity(admin, "DELETE_ALL_STOCK", {"deleted_files": deleted_count})
         
         await callback.message.edit_text(
@@ -2304,7 +2350,7 @@ async def confirm_delete_stock(callback: types.CallbackQuery):
         await callback.answer("Deleted ✅")
         
     except Exception as e:
-        logger.error(f"Failed to delete stock: {e}")
+        logger.error(f"❌ Error in confirm_delete_stock: {e}")
         await callback.answer("❌ Error deleting stock", show_alert=True)
 
 @dp.callback_query(F.data == "cancel_delete")
@@ -2320,422 +2366,397 @@ async def cancel_delete(callback: types.CallbackQuery):
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     """Handle document uploads (Excel files)"""
-    uid = message.from_user.id
-    user = get_logged_user(uid)
-    
-    if not user:
-        await message.reply("🔒 Please login first.")
-        return
-    
-    # Check file size (max 10MB)
-    if message.document.file_size > 10 * 1024 * 1024:
-        await message.reply("❌ File too large. Max size is 10MB.")
-        return
-    
-    # Check file extension
-    file_name = message.document.file_name.lower()
-    if not file_name.endswith(('.xlsx', '.xls')):
-        await message.reply("❌ Only Excel files (.xlsx, .xls) are allowed.")
-        return
-    
-    # Download file
     try:
+        uid = message.from_user.id
+        user = get_logged_user(uid)
+        
+        if not user:
+            await message.reply("🔒 Please login first.")
+            return
+        
+        if message.document.file_size > 10 * 1024 * 1024:
+            await message.reply("❌ File too large. Max size is 10MB.")
+            return
+        
+        file_name = message.document.file_name.lower()
+        if not file_name.endswith(('.xlsx', '.xls')):
+            await message.reply("❌ Only Excel files (.xlsx, .xls) are allowed.")
+            return
+        
         file = await bot.get_file(message.document.file_id)
         temp_path = f"/tmp/{uid}_{int(time.time())}_{file_name}"
         await bot.download_file(file.file_path, temp_path)
-    except Exception as e:
-        logger.error(f"Failed to download file: {e}")
-        await message.reply("❌ Failed to download file.")
-        return
-    
-    try:
-        # Read Excel file
+        
         df = pd.read_excel(temp_path)
         
-        # Handle based on user role and state
         state = user_state.get(uid, {})
         
         if user["ROLE"] == "supplier" and not state.get("step") == "bulk_deal_excel":
-            # Supplier stock upload
             await handle_supplier_stock_upload(message, user, df, temp_path)
             
         elif user["ROLE"] == "client" and state.get("step") == "bulk_deal_excel":
-            # Client bulk deal requests
             await handle_bulk_deal_requests(message, user, df, temp_path)
             
         elif user["ROLE"] == "admin":
-            # Admin deal approvals
             await handle_admin_deal_approvals(message, user, df, temp_path)
             
         elif user["ROLE"] == "supplier" and "Deal ID" in df.columns:
-            # Supplier deal responses
             await handle_supplier_deal_responses(message, user, df, temp_path)
             
         else:
             await message.reply("❌ Invalid file format or action.")
             
     except Exception as e:
-        logger.error(f"Failed to process Excel file: {e}")
+        logger.error(f"❌ Error in handle_document: {e}", exc_info=True)
         await message.reply(f"❌ Error processing file: {str(e)}")
         
     finally:
-        # Clean up temp file
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
 async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str):
     """Handle supplier stock upload"""
-    # Check required columns
-    required_cols = [
-        "Stock #", "Shape", "Weight", "Color", "Clarity",
-        "Price Per Carat", "Lab", "Report #", "Diamond Type", "Description"
-    ]
-    
-    missing_cols = [col for col in required_cols if col not in df.columns]
-    if missing_cols:
-        await message.reply(f"❌ Missing required columns: {', '.join(missing_cols)}")
-        return
-    
-    # Validate data
-    if df["Stock #"].isnull().any():
-        await message.reply("❌ Stock # cannot be empty")
-        return
-    
-    if df["Stock #"].duplicated().any():
-        duplicates = df[df["Stock #"].duplicated()]["Stock #"].unique()
-        await message.reply(f"❌ Duplicate Stock # found: {', '.join(duplicates[:5])}")
-        return
-    
-    # Convert numeric columns
-    df["Weight"] = pd.to_numeric(df["Weight"], errors="coerce")
-    df["Price Per Carat"] = pd.to_numeric(df["Price Per Carat"], errors="coerce")
-    
-    if df["Weight"].isnull().any() or (df["Weight"] <= 0).any():
-        await message.reply("❌ Invalid weight values")
-        return
-    
-    if df["Price Per Carat"].isnull().any() or (df["Price Per Carat"] <= 0).any():
-        await message.reply("❌ Invalid price values")
-        return
-    
-    # Add supplier info
-    supplier_key = user.get("SUPPLIER_KEY", f"supplier_{user['USERNAME'].lower()}")
-    df["SUPPLIER"] = supplier_key
-    df["LOCKED"] = "NO"
-    
-    # Save to supplier folder
-    supplier_file = f"{SUPPLIER_STOCK_FOLDER}{supplier_key}.xlsx"
-    temp_supplier_path = f"/tmp/{supplier_key}.xlsx"
-    
-    # Prevent formula injection
-    for col in df.select_dtypes(include="object"):
-        df[col] = df[col].map(safe_excel)
-    
-    df.to_excel(temp_supplier_path, index=False)
-    s3.upload_file(temp_supplier_path, CONFIG["AWS_BUCKET"], supplier_file)
-    
-    # Rebuild combined stock
-    rebuild_combined_stock()
-    
-    # Calculate statistics
-    total_stones = len(df)
-    total_carats = df["Weight"].sum()
-    total_value = (df["Weight"] * df["Price Per Carat"]).sum()
-    
-    # Send success message
-    success_msg = (
-        f"✅ **Stock Upload Successful!**\n\n"
-        f"📊 **Statistics:**\n"
-        f"• 💎 Diamonds: {total_stones}\n"
-        f"• ⚖️ Total Carats: {total_carats:.2f}\n"
-        f"• 💰 Total Value: ${total_value:,.2f}\n\n"
-        f"📈 **Price Range:**\n"
-        f"• Min: ${df['Price Per Carat'].min():,.0f}/ct\n"
-        f"• Avg: ${df['Price Per Carat'].mean():,.0f}/ct\n"
-        f"• Max: ${df['Price Per Carat'].max():,.0f}/ct\n\n"
-        f"🔄 Combined stock has been updated."
-    )
-    
-    await message.reply(success_msg)
-    
-    # Log activity
-    log_activity(user, "UPLOAD_STOCK", {
-        "stones": total_stones,
-        "carats": total_carats,
-        "value": total_value
-    })
-    
-    # Clean up
-    if os.path.exists(temp_supplier_path):
-        os.remove(temp_supplier_path)
+    try:
+        required_cols = [
+            "Stock #", "Shape", "Weight", "Color", "Clarity",
+            "Price Per Carat", "Lab", "Report #", "Diamond Type", "Description"
+        ]
+        
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            await message.reply(f"❌ Missing required columns: {', '.join(missing_cols)}")
+            return
+        
+        if df["Stock #"].isnull().any():
+            await message.reply("❌ Stock # cannot be empty")
+            return
+        
+        if df["Stock #"].duplicated().any():
+            duplicates = df[df["Stock #"].duplicated()]["Stock #"].unique()
+            await message.reply(f"❌ Duplicate Stock # found: {', '.join(duplicates[:5])}")
+            return
+        
+        df["Weight"] = pd.to_numeric(df["Weight"], errors="coerce")
+        df["Price Per Carat"] = pd.to_numeric(df["Price Per Carat"], errors="coerce")
+        
+        if df["Weight"].isnull().any() or (df["Weight"] <= 0).any():
+            await message.reply("❌ Invalid weight values")
+            return
+        
+        if df["Price Per Carat"].isnull().any() or (df["Price Per Carat"] <= 0).any():
+            await message.reply("❌ Invalid price values")
+            return
+        
+        supplier_key = user.get("SUPPLIER_KEY", f"supplier_{user['USERNAME'].lower()}")
+        df["SUPPLIER"] = supplier_key
+        df["LOCKED"] = "NO"
+        
+        supplier_file = f"{SUPPLIER_STOCK_FOLDER}{supplier_key}.xlsx"
+        temp_supplier_path = f"/tmp/{supplier_key}.xlsx"
+        
+        for col in df.select_dtypes(include="object"):
+            df[col] = df[col].map(safe_excel)
+        
+        df.to_excel(temp_supplier_path, index=False)
+        s3.upload_file(temp_supplier_path, CONFIG["AWS_BUCKET"], supplier_file)
+        
+        rebuild_combined_stock()
+        
+        total_stones = len(df)
+        total_carats = df["Weight"].sum()
+        total_value = (df["Weight"] * df["Price Per Carat"]).sum()
+        
+        success_msg = (
+            f"✅ **Stock Upload Successful!**\n\n"
+            f"📊 **Statistics:**\n"
+            f"• 💎 Diamonds: {total_stones}\n"
+            f"• ⚖️ Total Carats: {total_carats:.2f}\n"
+            f"• 💰 Total Value: ${total_value:,.2f}\n\n"
+            f"📈 **Price Range:**\n"
+            f"• Min: ${df['Price Per Carat'].min():,.0f}/ct\n"
+            f"• Avg: ${df['Price Per Carat'].mean():,.0f}/ct\n"
+            f"• Max: ${df['Price Per Carat'].max():,.0f}/ct\n\n"
+            f"🔄 Combined stock has been updated."
+        )
+        
+        await message.reply(success_msg)
+        
+        log_activity(user, "UPLOAD_STOCK", {
+            "stones": total_stones,
+            "carats": total_carats,
+            "value": total_value
+        })
+        
+        if os.path.exists(temp_supplier_path):
+            os.remove(temp_supplier_path)
+            
+    except Exception as e:
+        logger.error(f"❌ Error in handle_supplier_stock_upload: {e}")
+        await message.reply("❌ Failed to upload stock.")
 
 async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str):
     """Handle client bulk deal requests"""
-    if "Stock #" not in df.columns or "Offer Price ($/ct)" not in df.columns:
-        await message.reply("❌ Invalid format. Need 'Stock #' and 'Offer Price ($/ct)' columns.")
-        return
-    
-    # Filter out empty rows
-    df = df.dropna(subset=["Stock #", "Offer Price ($/ct)"])
-    
-    if df.empty:
-        await message.reply("❌ No valid deal requests found.")
-        return
-    
-    # Load current stock
-    stock_df = load_stock()
-    
-    successful_deals = 0
-    failed_deals = []
-    
-    for _, row in df.iterrows():
-        stone_id = str(row["Stock #"]).strip()
+    try:
+        if "Stock #" not in df.columns or "Offer Price ($/ct)" not in df.columns:
+            await message.reply("❌ Invalid format. Need 'Stock #' and 'Offer Price ($/ct)' columns.")
+            return
         
-        try:
-            offer_price = float(row["Offer Price ($/ct)"])
-            if offer_price <= 0:
-                failed_deals.append(f"{stone_id}: Invalid price")
+        df = df.dropna(subset=["Stock #", "Offer Price ($/ct)"])
+        
+        if df.empty:
+            await message.reply("❌ No valid deal requests found.")
+            return
+        
+        stock_df = load_stock()
+        
+        successful_deals = 0
+        failed_deals = []
+        
+        for _, row in df.iterrows():
+            stone_id = str(row["Stock #"]).strip()
+            
+            try:
+                offer_price = float(row["Offer Price ($/ct)"])
+                if offer_price <= 0:
+                    failed_deals.append(f"{stone_id}: Invalid price")
+                    continue
+            except:
+                failed_deals.append(f"{stone_id}: Invalid price format")
                 continue
-        except:
-            failed_deals.append(f"{stone_id}: Invalid price format")
-            continue
+            
+            stone_row = stock_df[stock_df["Stock #"] == stone_id]
+            
+            if stone_row.empty:
+                failed_deals.append(f"{stone_id}: Not found")
+                continue
+            
+            if stone_row.iloc[0].get("LOCKED") == "YES":
+                failed_deals.append(f"{stone_id}: Already locked")
+                continue
+            
+            deal_id = f"DEAL-{uuid.uuid4().hex[:10].upper()}"
+            stone_data = stone_row.iloc[0]
+            
+            deal = {
+                "deal_id": deal_id,
+                "stone_id": stone_id,
+                "supplier_username": stone_data.get("SUPPLIER", "").replace("supplier_", ""),
+                "client_username": user["USERNAME"],
+                "actual_stock_price": float(stone_data.get("Price Per Carat", 0)),
+                "client_offer_price": offer_price,
+                "supplier_action": "PENDING",
+                "admin_action": "PENDING",
+                "final_status": "OPEN",
+                "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            if not atomic_lock_stone(stone_id):
+                failed_deals.append(f"{stone_id}: Lock failed")
+                continue
+            
+            deal_key = f"{DEALS_FOLDER}{deal_id}.json"
+            s3.put_object(
+                Bucket=CONFIG["AWS_BUCKET"],
+                Key=deal_key,
+                Body=json.dumps(deal, indent=2),
+                ContentType="application/json"
+            )
+            
+            log_deal_history(deal)
+            
+            save_notification(
+                deal["supplier_username"],
+                "supplier",
+                f"📩 New bulk deal offer for Stone {stone_id}"
+            )
+            
+            successful_deals += 1
         
-        # Check stone availability
-        stone_row = stock_df[stock_df["Stock #"] == stone_id]
+        result_msg = f"📊 **Bulk Deal Results**\n\n"
+        result_msg += f"✅ Successful: {successful_deals}\n"
+        result_msg += f"❌ Failed: {len(failed_deals)}\n"
         
-        if stone_row.empty:
-            failed_deals.append(f"{stone_id}: Not found")
-            continue
+        if failed_deals:
+            result_msg += f"\n**Failed deals:**\n"
+            for fail in failed_deals[:10]:
+                result_msg += f"• {fail}\n"
+            
+            if len(failed_deals) > 10:
+                result_msg += f"... and {len(failed_deals) - 10} more\n"
         
-        if stone_row.iloc[0].get("LOCKED") == "YES":
-            failed_deals.append(f"{stone_id}: Already locked")
-            continue
+        await message.reply(result_msg)
         
-        # Create deal
-        deal_id = f"DEAL-{uuid.uuid4().hex[:10].upper()}"
-        stone_data = stone_row.iloc[0]
+        user_state.pop(message.from_user.id, None)
         
-        deal = {
-            "deal_id": deal_id,
-            "stone_id": stone_id,
-            "supplier_username": stone_data.get("SUPPLIER", "").replace("supplier_", ""),
-            "client_username": user["USERNAME"],
-            "actual_stock_price": float(stone_data.get("Price Per Carat", 0)),
-            "client_offer_price": offer_price,
-            "supplier_action": "PENDING",
-            "admin_action": "PENDING",
-            "final_status": "OPEN",
-            "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
-        }
+        log_activity(user, "BULK_DEAL_REQUEST", {
+            "successful": successful_deals,
+            "failed": len(failed_deals)
+        })
         
-        # Lock the stone
-        if not atomic_lock_stone(stone_id):
-            failed_deals.append(f"{stone_id}: Lock failed")
-            continue
-        
-        # Save deal
-        deal_key = f"{DEALS_FOLDER}{deal_id}.json"
-        s3.put_object(
-            Bucket=CONFIG["AWS_BUCKET"],
-            Key=deal_key,
-            Body=json.dumps(deal, indent=2),
-            ContentType="application/json"
-        )
-        
-        log_deal_history(deal)
-        
-        # Notify supplier
-        save_notification(
-            deal["supplier_username"],
-            "supplier",
-            f"📩 New bulk deal offer for Stone {stone_id}"
-        )
-        
-        successful_deals += 1
-    
-    # Send results
-    result_msg = f"📊 **Bulk Deal Results**\n\n"
-    result_msg += f"✅ Successful: {successful_deals}\n"
-    result_msg += f"❌ Failed: {len(failed_deals)}\n"
-    
-    if failed_deals:
-        result_msg += f"\n**Failed deals:**\n"
-        for fail in failed_deals[:10]:  # Show first 10 failures
-            result_msg += f"• {fail}\n"
-        
-        if len(failed_deals) > 10:
-            result_msg += f"... and {len(failed_deals) - 10} more\n"
-    
-    await message.reply(result_msg)
-    
-    # Clear user state
-    user_state.pop(message.from_user.id, None)
-    
-    # Log activity
-    log_activity(user, "BULK_DEAL_REQUEST", {
-        "successful": successful_deals,
-        "failed": len(failed_deals)
-    })
+    except Exception as e:
+        logger.error(f"❌ Error in handle_bulk_deal_requests: {e}")
+        await message.reply("❌ Failed to process bulk deal requests.")
 
 async def handle_admin_deal_approvals(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str):
     """Handle admin deal approval Excel"""
-    required_cols = ["Deal ID", "Admin Action (YES/NO)"]
-    for col in required_cols:
-        if col not in df.columns:
-            await message.reply(f"❌ Missing column: {col}")
-            return
-    
-    processed = 0
-    for _, row in df.iterrows():
-        if pd.isna(row["Deal ID"]):
-            continue
+    try:
+        required_cols = ["Deal ID", "Admin Action (YES/NO)"]
+        for col in required_cols:
+            if col not in df.columns:
+                await message.reply(f"❌ Missing column: {col}")
+                return
         
-        deal_id = str(row["Deal ID"]).strip()
-        action = str(row["Admin Action (YES/NO)"]).strip().upper()
-        
-        if action not in ["YES", "NO"]:
-            continue
-        
-        try:
-            deal_key = f"{DEALS_FOLDER}{deal_id}.json"
-            deal_data = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=deal_key)
-            deal = json.loads(deal_data["Body"].read())
-            
-            if deal.get("final_status") in ["COMPLETED", "CLOSED"]:
+        processed = 0
+        for _, row in df.iterrows():
+            if pd.isna(row["Deal ID"]):
                 continue
             
-            if action == "YES":
-                deal["admin_action"] = "APPROVED"
-                deal["final_status"] = "COMPLETED"
+            deal_id = str(row["Deal ID"]).strip()
+            action = str(row["Admin Action (YES/NO)"]).strip().upper()
+            
+            if action not in ["YES", "NO"]:
+                continue
+            
+            try:
+                deal_key = f"{DEALS_FOLDER}{deal_id}.json"
+                deal_data = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=deal_key)
+                deal = json.loads(deal_data["Body"].read())
                 
-                # Remove stone from stock
-                remove_stone_from_supplier_and_combined(deal["stone_id"])
+                if deal.get("final_status") in ["COMPLETED", "CLOSED"]:
+                    continue
                 
-                # Notify parties
-                save_notification(
-                    deal["client_username"],
-                    "client",
-                    f"✅ Deal {deal_id} approved for Stone {deal['stone_id']}"
+                if action == "YES":
+                    deal["admin_action"] = "APPROVED"
+                    deal["final_status"] = "COMPLETED"
+                    
+                    remove_stone_from_supplier_and_combined(deal["stone_id"])
+                    
+                    save_notification(
+                        deal["client_username"],
+                        "client",
+                        f"✅ Deal {deal_id} approved for Stone {deal['stone_id']}"
+                    )
+                    
+                    save_notification(
+                        deal["supplier_username"],
+                        "supplier",
+                        f"✅ Deal {deal_id} approved. Please deliver Stone {deal['stone_id']}"
+                    )
+                    
+                else:
+                    deal["admin_action"] = "REJECTED"
+                    deal["final_status"] = "CLOSED"
+                    
+                    unlock_stone(deal["stone_id"])
+                    
+                    save_notification(
+                        deal["client_username"],
+                        "client",
+                        f"❌ Deal {deal_id} rejected for Stone {deal['stone_id']}"
+                    )
+                
+                s3.put_object(
+                    Bucket=CONFIG["AWS_BUCKET"],
+                    Key=deal_key,
+                    Body=json.dumps(deal, indent=2),
+                    ContentType="application/json"
                 )
                 
-                save_notification(
-                    deal["supplier_username"],
-                    "supplier",
-                    f"✅ Deal {deal_id} approved. Please deliver Stone {deal['stone_id']}"
-                )
+                log_deal_history(deal)
+                processed += 1
                 
-            else:  # NO
-                deal["admin_action"] = "REJECTED"
-                deal["final_status"] = "CLOSED"
-                
-                # Unlock stone
-                unlock_stone(deal["stone_id"])
-                
-                # Notify client
-                save_notification(
-                    deal["client_username"],
-                    "client",
-                    f"❌ Deal {deal_id} rejected for Stone {deal['stone_id']}"
-                )
-            
-            # Save updated deal
-            s3.put_object(
-                Bucket=CONFIG["AWS_BUCKET"],
-                Key=deal_key,
-                Body=json.dumps(deal, indent=2),
-                ContentType="application/json"
-            )
-            
-            log_deal_history(deal)
-            processed += 1
-            
-        except Exception as e:
-            logger.error(f"Failed to process deal {deal_id}: {e}")
-            continue
-    
-    await message.reply(f"✅ Processed {processed} deal approvals.")
-    log_activity(user, "PROCESS_DEAL_APPROVALS", {"count": processed})
+            except Exception as e:
+                logger.error(f"Failed to process deal {deal_id}: {e}")
+                continue
+        
+        await message.reply(f"✅ Processed {processed} deal approvals.")
+        log_activity(user, "PROCESS_DEAL_APPROVALS", {"count": processed})
+        
+    except Exception as e:
+        logger.error(f"❌ Error in handle_admin_deal_approvals: {e}")
+        await message.reply("❌ Failed to process deal approvals.")
 
 async def handle_supplier_deal_responses(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str):
     """Handle supplier deal response Excel"""
-    if "Deal ID" not in df.columns or "Supplier Action (ACCEPT/REJECT)" not in df.columns:
-        await message.reply("❌ Invalid format. Need 'Deal ID' and 'Supplier Action (ACCEPT/REJECT)' columns.")
-        return
-    
-    processed = 0
-    for _, row in df.iterrows():
-        if pd.isna(row["Deal ID"]):
-            continue
+    try:
+        if "Deal ID" not in df.columns or "Supplier Action (ACCEPT/REJECT)" not in df.columns:
+            await message.reply("❌ Invalid format. Need 'Deal ID' and 'Supplier Action (ACCEPT/REJECT)' columns.")
+            return
         
-        deal_id = str(row["Deal ID"]).strip()
-        action = str(row["Supplier Action (ACCEPT/REJECT)"]).strip().upper()
-        
-        if action not in ["ACCEPT", "REJECT"]:
-            continue
-        
-        try:
-            deal_key = f"{DEALS_FOLDER}{deal_id}.json"
-            deal_data = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=deal_key)
-            deal = json.loads(deal_data["Body"].read())
-            
-            # Check if supplier owns this deal
-            if deal.get("supplier_username", "").lower() != user["USERNAME"].lower():
+        processed = 0
+        for _, row in df.iterrows():
+            if pd.isna(row["Deal ID"]):
                 continue
             
-            if deal.get("final_status") in ["COMPLETED", "CLOSED"]:
+            deal_id = str(row["Deal ID"]).strip()
+            action = str(row["Supplier Action (ACCEPT/REJECT)"]).strip().upper()
+            
+            if action not in ["ACCEPT", "REJECT"]:
                 continue
             
-            if action == "ACCEPT":
-                deal["supplier_action"] = "ACCEPTED"
-                deal["admin_action"] = "PENDING"
+            try:
+                deal_key = f"{DEALS_FOLDER}{deal_id}.json"
+                deal_data = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=deal_key)
+                deal = json.loads(deal_data["Body"].read())
                 
-                save_notification(
-                    deal["client_username"],
-                    "client",
-                    f"✅ Supplier accepted deal {deal_id} for Stone {deal['stone_id']}"
-                )
+                if deal.get("supplier_username", "").lower() != user["USERNAME"].lower():
+                    continue
                 
-                # Notify admins
-                admin_df = load_accounts()
-                admins = admin_df[admin_df["ROLE"].str.lower() == "admin"]["USERNAME"].tolist()
-                for admin in admins:
+                if deal.get("final_status") in ["COMPLETED", "CLOSED"]:
+                    continue
+                
+                if action == "ACCEPT":
+                    deal["supplier_action"] = "ACCEPTED"
+                    deal["admin_action"] = "PENDING"
+                    
                     save_notification(
-                        admin,
-                        "admin",
-                        f"📝 Deal {deal_id} awaiting admin approval"
+                        deal["client_username"],
+                        "client",
+                        f"✅ Supplier accepted deal {deal_id} for Stone {deal['stone_id']}"
                     )
                     
-            else:  # REJECT
-                deal["supplier_action"] = "REJECTED"
-                deal["admin_action"] = "REJECTED"
-                deal["final_status"] = "CLOSED"
+                    admin_df = load_accounts()
+                    admins = admin_df[admin_df["ROLE"].str.lower() == "admin"]["USERNAME"].tolist()
+                    for admin in admins:
+                        save_notification(
+                            admin,
+                            "admin",
+                            f"📝 Deal {deal_id} awaiting admin approval"
+                        )
+                        
+                else:
+                    deal["supplier_action"] = "REJECTED"
+                    deal["admin_action"] = "REJECTED"
+                    deal["final_status"] = "CLOSED"
+                    
+                    unlock_stone(deal["stone_id"])
+                    
+                    save_notification(
+                        deal["client_username"],
+                        "client",
+                        f"❌ Supplier rejected deal {deal_id} for Stone {deal['stone_id']}"
+                    )
                 
-                # Unlock stone
-                unlock_stone(deal["stone_id"])
-                
-                save_notification(
-                    deal["client_username"],
-                    "client",
-                    f"❌ Supplier rejected deal {deal_id} for Stone {deal['stone_id']}"
+                s3.put_object(
+                    Bucket=CONFIG["AWS_BUCKET"],
+                    Key=deal_key,
+                    Body=json.dumps(deal, indent=2),
+                    ContentType="application/json"
                 )
-            
-            # Save updated deal
-            s3.put_object(
-                Bucket=CONFIG["AWS_BUCKET"],
-                Key=deal_key,
-                Body=json.dumps(deal, indent=2),
-                ContentType="application/json"
-            )
-            
-            log_deal_history(deal)
-            processed += 1
-            
-        except Exception as e:
-            logger.error(f"Failed to process deal {deal_id}: {e}")
-            continue
-    
-    await message.reply(f"✅ Processed {processed} deal responses.")
-    log_activity(user, "PROCESS_DEAL_RESPONSES", {"count": processed})
+                
+                log_deal_history(deal)
+                processed += 1
+                
+            except Exception as e:
+                logger.error(f"Failed to process deal {deal_id}: {e}")
+                continue
+        
+        await message.reply(f"✅ Processed {processed} deal responses.")
+        log_activity(user, "PROCESS_DEAL_RESPONSES", {"count": processed})
+        
+    except Exception as e:
+        logger.error(f"❌ Error in handle_supplier_deal_responses: {e}")
+        await message.reply("❌ Failed to process deal responses.")
 
 # -------- MAIN ENTRY POINT --------
 if __name__ == "__main__":
@@ -2743,6 +2764,11 @@ if __name__ == "__main__":
     logger.info(f"📊 Python: {CONFIG['PYTHON_VERSION']}")
     logger.info(f"🌐 Port: {CONFIG['PORT']}")
     logger.info(f"🔗 Webhook URL: {CONFIG['WEBHOOK_URL']}")
+    
+    # List all registered handlers
+    logger.info("📋 Registered handlers:")
+    for handler in dp.message_handlers:
+        logger.info(f"  - {handler}")
     
     uvicorn.run(
         app,
