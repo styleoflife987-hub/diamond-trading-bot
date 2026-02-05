@@ -1,5 +1,4 @@
 import asyncio
-import nest_asyncio
 import pandas as pd
 import boto3
 import re
@@ -20,9 +19,6 @@ import unicodedata
 import uvicorn
 from typing import Optional, Dict, Any, List
 import logging
-
-# Apply nest_asyncio for async compatibility
-nest_asyncio.apply()
 
 # -------- SETUP LOGGING --------
 logging.basicConfig(
@@ -57,7 +53,7 @@ def load_env_config():
         "AWS_REGION": os.getenv("AWS_REGION", "ap-south-1"),
         "AWS_BUCKET": os.getenv("AWS_BUCKET"),
         "PORT": int(os.getenv("PORT", "10000")),
-        "PYTHON_VERSION": os.getenv("PYTHON_VERSION", "3.9"),
+        "PYTHON_VERSION": os.getenv("PYTHON_VERSION", "3.11.0"),
         "SESSION_TIMEOUT": int(os.getenv("SESSION_TIMEOUT", "3600")),
         "RATE_LIMIT": int(os.getenv("RATE_LIMIT", "5")),
         "RATE_LIMIT_WINDOW": int(os.getenv("RATE_LIMIT_WINDOW", "10")),
@@ -73,11 +69,13 @@ def load_env_config():
     
     # Auto-generate webhook URL if not set
     if not config["WEBHOOK_URL"]:
-        # This should be your actual Render/Heroku URL
-        config["WEBHOOK_URL"] = f"https://telegram-bot-fill.onrender.com/webhook"
+        # You should set this in Render dashboard
+        config["WEBHOOK_URL"] = os.getenv("RENDER_EXTERNAL_URL", "") + "/webhook"
+        if not config["WEBHOOK_URL"]:
+            config["WEBHOOK_URL"] = "https://your-app-name.onrender.com/webhook"
     
-    logger.info(f"Config loaded: BOT_TOKEN present: {bool(config['BOT_TOKEN'])}")
-    logger.info(f"Webhook URL: {config['WEBHOOK_URL']}")
+    logger.info(f"✅ Config loaded: BOT_TOKEN present: {bool(config['BOT_TOKEN'])}")
+    logger.info(f"🌐 Webhook URL: {config['WEBHOOK_URL']}")
     
     return config
 
@@ -777,7 +775,7 @@ async def lifespan(app: FastAPI):
         
         # Set webhook
         webhook_url = CONFIG["WEBHOOK_URL"]
-        if webhook_url:
+        if webhook_url and webhook_url != "https://your-app-name.onrender.com/webhook":
             await bot.set_webhook(
                 url=webhook_url,
                 drop_pending_updates=True,
@@ -785,7 +783,7 @@ async def lifespan(app: FastAPI):
             )
             logger.info(f"✅ Webhook set to: {webhook_url}")
         else:
-            logger.warning("⚠️ No webhook URL set, using polling")
+            logger.warning("⚠️ No valid webhook URL set")
         
     except Exception as e:
         logger.error(f"❌ Startup error: {e}")
@@ -842,7 +840,7 @@ async def health_check():
     return {
         "status": "healthy" if BOT_STARTED else "starting",
         "bot": "running" if BOT_STARTED else "stopped",
-        "webhook": "set" if BOT_STARTED else "not set",
+        "webhook": "set" if CONFIG["WEBHOOK_URL"] else "not set",
         "active_users": len(logged_in_users),
         "timestamp": datetime.now().isoformat()
     }
@@ -874,8 +872,8 @@ async def set_webhook_endpoint():
     """Manual endpoint to set webhook (for testing)"""
     try:
         webhook_url = CONFIG["WEBHOOK_URL"]
-        if not webhook_url:
-            return {"status": "error", "error": "No webhook URL configured"}
+        if not webhook_url or webhook_url == "https://your-app-name.onrender.com/webhook":
+            return {"status": "error", "error": "Please set a valid WEBHOOK_URL in environment variables"}
         
         await bot.set_webhook(
             url=webhook_url,
@@ -899,13 +897,16 @@ async def delete_webhook_endpoint():
 async def test_bot():
     """Test if bot can send messages"""
     try:
-        # Send a test message
+        # Send a test message to yourself
         test_chat_id = os.getenv("TEST_CHAT_ID", "123456789")  # Set your chat ID
-        await bot.send_message(
-            chat_id=int(test_chat_id),
-            text="🤖 Bot is working! Test message."
-        )
-        return {"status": "success", "message": "Test message sent"}
+        if test_chat_id and test_chat_id != "123456789":
+            await bot.send_message(
+                chat_id=int(test_chat_id),
+                text="🤖 Bot is working! Test message."
+            )
+            return {"status": "success", "message": "Test message sent"}
+        else:
+            return {"status": "warning", "message": "TEST_CHAT_ID not set or is default"}
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
@@ -2764,11 +2765,7 @@ if __name__ == "__main__":
     logger.info(f"📊 Python: {CONFIG['PYTHON_VERSION']}")
     logger.info(f"🌐 Port: {CONFIG['PORT']}")
     logger.info(f"🔗 Webhook URL: {CONFIG['WEBHOOK_URL']}")
-    
-    # List all registered handlers
-    logger.info("📋 Registered handlers:")
-    for handler in dp.message_handlers:
-        logger.info(f"  - {handler}")
+    logger.info(f"🤖 Bot Token: {'Set' if CONFIG['BOT_TOKEN'] else 'Not Set'}")
     
     uvicorn.run(
         app,
@@ -2776,4 +2773,4 @@ if __name__ == "__main__":
         port=CONFIG["PORT"],
         reload=False,
         log_level="info"
-    )
+)
