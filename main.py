@@ -9,7 +9,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from contextlib import asynccontextmanager
 import os
 import json
@@ -58,6 +58,7 @@ def load_env_config():
         "SESSION_TIMEOUT": int(os.getenv("SESSION_TIMEOUT", "3600")),  # 1 hour
         "RATE_LIMIT": int(os.getenv("RATE_LIMIT", "5")),  # messages per window
         "RATE_LIMIT_WINDOW": int(os.getenv("RATE_LIMIT_WINDOW", "10")),  # seconds
+        "WEBHOOK_URL": os.getenv("WEBHOOK_URL", ""),  # Add webhook URL
     }
     
     # Validate required configurations
@@ -66,6 +67,10 @@ def load_env_config():
     
     if not all([config["AWS_ACCESS_KEY_ID"], config["AWS_SECRET_ACCESS_KEY"], config["AWS_BUCKET"]]):
         logger.warning("AWS credentials not fully set. Some features may not work.")
+    
+    # Auto-generate webhook URL if not set
+    if not config["WEBHOOK_URL"]:
+        config["WEBHOOK_URL"] = f"https://telegram-bot-fill.onrender.com/webhook"
     
     return config
 
@@ -791,9 +796,9 @@ async def lifespan(app: FastAPI):
         # Load sessions
         load_sessions()
         
-        # Delete webhook for polling
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("✅ Webhook deleted")
+        # Set webhook for Render
+        await bot.set_webhook(CONFIG["WEBHOOK_URL"], drop_pending_updates=True)
+        logger.info(f"✅ Webhook set to: {CONFIG['WEBHOOK_URL']}")
         
     except Exception as e:
         logger.error(f"Startup error: {e}")
@@ -801,7 +806,6 @@ async def lifespan(app: FastAPI):
     BOT_STARTED = True
     
     # Start background tasks
-    asyncio.create_task(dp.start_polling(bot))
     asyncio.create_task(session_cleanup_loop())
     asyncio.create_task(user_state_cleanup_loop())
     
@@ -827,6 +831,7 @@ async def root():
         "status": "online",
         "service": "Diamond Trading Bot",
         "bot_started": BOT_STARTED,
+        "webhook_url": CONFIG["WEBHOOK_URL"],
         "timestamp": datetime.now().isoformat(),
         "active_sessions": len(logged_in_users)
     }
@@ -836,6 +841,7 @@ async def health_check():
     return {
         "status": "healthy" if BOT_STARTED else "starting",
         "bot": "running" if BOT_STARTED else "stopped",
+        "webhook": "set" if BOT_STARTED else "not set",
         "active_users": len(logged_in_users),
         "timestamp": datetime.now().isoformat()
     }
@@ -847,6 +853,36 @@ async def get_sessions():
         "active_sessions": len(logged_in_users),
         "sessions": logged_in_users
     }
+
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    """Handle Telegram webhook updates"""
+    try:
+        update_data = await request.json()
+        telegram_update = types.Update(**update_data)
+        await dp.feed_update(bot=bot, update=telegram_update)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/setwebhook")
+async def set_webhook_endpoint():
+    """Manual endpoint to set webhook (for testing)"""
+    try:
+        await bot.set_webhook(CONFIG["WEBHOOK_URL"], drop_pending_updates=True)
+        return {"status": "success", "webhook_url": CONFIG["WEBHOOK_URL"]}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+@app.get("/deletewebhook")
+async def delete_webhook_endpoint():
+    """Manual endpoint to delete webhook"""
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        return {"status": "success", "message": "Webhook deleted"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 # -------- COMMAND HANDLERS --------
 @dp.message(Command("start"))
@@ -2489,7 +2525,7 @@ async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.D
             "supplier_action": "PENDING",
             "admin_action": "PENDING",
             "final_status": "OPEN",
-            "created_at": datetime.now(IST).strftime("%Y-%m-d %H:%M:%S")
+            "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
         }
         
         # Lock the stone
@@ -2708,6 +2744,7 @@ if __name__ == "__main__":
     logger.info(f"🚀 Starting Diamond Trading Bot v1.0")
     logger.info(f"📊 Python: {CONFIG['PYTHON_VERSION']}")
     logger.info(f"🌐 Port: {CONFIG['PORT']}")
+    logger.info(f"🔗 Webhook URL: {CONFIG['WEBHOOK_URL']}")
     
     uvicorn.run(
         app,
