@@ -8,7 +8,7 @@ from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from contextlib import asynccontextmanager
 import os
 import json
@@ -17,8 +17,9 @@ import uuid
 import time
 import unicodedata
 import uvicorn
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 import logging
+from fastapi.responses import JSONResponse, FileResponse
 
 # -------- SETUP LOGGING --------
 logging.basicConfig(
@@ -159,6 +160,8 @@ supplier_kb = ReplyKeyboardMarkup(
 def clean_text(value: Any) -> str:
     """Clean and normalize text values"""
     if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
         return ""
     value = str(value)
     value = unicodedata.normalize("NFKC", value)
@@ -501,6 +504,163 @@ def fetch_unread_notifications(username: str, role: str) -> List[Dict]:
     except Exception:
         return []
 
+# -------- EXCEL VALIDATION & PARSING --------
+class DiamondExcelValidator:
+    """Validate diamond stock Excel files with flexible optional columns"""
+    
+    # REQUIRED columns - MUST have values
+    REQUIRED_COLUMNS = [
+        'Stock #',
+        'Shape', 
+        'Weight',
+        'Color',
+        'Clarity',
+        'Price Per Carat',
+        'Lab', 
+        'Report #',
+        'Diamond Type',
+        'Description'
+    ]
+    
+    # OPTIONAL columns - can be BLANK/EMPTY
+    OPTIONAL_COLUMNS = [
+        'CUT',
+        'Polish',
+        'Symmetry'
+    ]
+    
+    ALL_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
+    
+    @staticmethod
+    def validate_and_parse(df: pd.DataFrame, supplier_name: str) -> Tuple[bool, pd.DataFrame, List[str], List[str]]:
+        """
+        Validate and clean Excel data
+        
+        Args:
+            df: Pandas DataFrame from Excel
+            supplier_name: Name of supplier
+            
+        Returns:
+            Tuple: (success, cleaned_df, errors, warnings)
+        """
+        errors = []
+        warnings = []
+        
+        try:
+            # Clean column names
+            df.columns = [str(col).strip() for col in df.columns]
+            
+            # Check for missing REQUIRED columns
+            missing_required = []
+            for req_col in DiamondExcelValidator.REQUIRED_COLUMNS:
+                if req_col not in df.columns:
+                    missing_required.append(req_col)
+            
+            if missing_required:
+                errors.append(f'Missing required columns: {", ".join(missing_required)}')
+                return False, pd.DataFrame(), errors, warnings
+            
+            # Check for OPTIONAL columns (just warning, not error)
+            missing_optional = []
+            for opt_col in DiamondExcelValidator.OPTIONAL_COLUMNS:
+                if opt_col not in df.columns:
+                    missing_optional.append(opt_col)
+            
+            if missing_optional:
+                warnings.append(f'Optional columns not found (will be ignored): {", ".join(missing_optional)}')
+            
+            # Clean data
+            df = df.copy()
+            for col in df.columns:
+                if col in df.select_dtypes(include=['object']).columns:
+                    df[col] = df[col].fillna('').astype(str).apply(clean_text)
+            
+            # Validate REQUIRED columns are not empty
+            for req_col in DiamondExcelValidator.REQUIRED_COLUMNS:
+                if req_col in df.columns:
+                    empty_mask = df[req_col].isna() | (df[req_col] == '')
+                    if empty_mask.any():
+                        empty_count = empty_mask.sum()
+                        errors.append(f'{req_col}: {empty_count} rows are empty (required)')
+            
+            # Check for duplicate Stock #
+            if 'Stock #' in df.columns:
+                duplicate_mask = df.duplicated('Stock #', keep=False)
+                if duplicate_mask.any():
+                    duplicates = df[duplicate_mask]['Stock #'].unique().tolist()
+                    errors.append(f'Duplicate Stock # found: {", ".join(duplicates[:5])}')
+            
+            # Validate numeric columns
+            if 'Weight' in df.columns:
+                try:
+                    df['Weight'] = pd.to_numeric(df['Weight'], errors='coerce')
+                    invalid_weights = df['Weight'].isna() | (df['Weight'] <= 0)
+                    if invalid_weights.any():
+                        invalid_count = invalid_weights.sum()
+                        errors.append(f'Weight: {invalid_count} rows have invalid values (must be > 0)')
+                except:
+                    errors.append('Weight: Could not convert to numeric values')
+            
+            if 'Price Per Carat' in df.columns:
+                try:
+                    df['Price Per Carat'] = pd.to_numeric(df['Price Per Carat'], errors='coerce')
+                    invalid_prices = df['Price Per Carat'].isna() | (df['Price Per Carat'] <= 0)
+                    if invalid_prices.any():
+                        invalid_count = invalid_prices.sum()
+                        errors.append(f'Price Per Carat: {invalid_count} rows have invalid values (must be > 0)')
+                except:
+                    errors.append('Price Per Carat: Could not convert to numeric values')
+            
+            if errors:
+                return False, pd.DataFrame(), errors, warnings
+            
+            # Add metadata columns
+            df['SUPPLIER'] = supplier_name
+            df['LOCKED'] = 'NO'
+            df['UPLOADED_AT'] = datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Ensure all columns are present
+            for col in DiamondExcelValidator.ALL_COLUMNS:
+                if col not in df.columns:
+                    df[col] = ''
+            
+            # Handle optional columns - if empty, leave as empty string
+            for opt_col in DiamondExcelValidator.OPTIONAL_COLUMNS:
+                if opt_col in df.columns:
+                    # Already cleaned, keep as is (can be empty)
+                    pass
+            
+            # Reorder columns for consistency
+            desired_order = ['Stock #', 'Availability', 'Shape', 'Weight', 'Color', 'Clarity', 
+                           'Cut', 'Polish', 'Symmetry', 'Fluorescence Color', 'Measurements', 
+                           'Shade', 'Milky', 'Eye Clean', 'Lab', 'Report #', 'Location', 
+                           'Treatment', 'Discount', 'Price Per Carat', 'Final Price', 'Depth %', 
+                           'Table %', 'Girdle Thin', 'Girdle Thick', 'Girdle %', 'Girdle Condition', 
+                           'Culet Size', 'Culet Condition', 'Crown Height', 'Crown Angle', 
+                           'Pavilion Depth', 'Pavilion Angle', 'Inscription', 'Cert comment', 
+                           'KeyToSymbols', 'White Inclusion', 'Black Inclusion', 'Open Inclusion', 
+                           'Fancy Color', 'Fancy Color Intensity', 'Fancy Color Overtone', 
+                           'Country', 'State', 'City', 'CertFile', 'Diamond Video', 'Diamond Image', 
+                           'SUPPLIER', 'LOCKED', 'Diamond Type', 'UPLOADED_AT', 'Description']
+            
+            # Add missing columns with empty values
+            for col in desired_order:
+                if col not in df.columns:
+                    df[col] = ''
+            
+            # Select only desired columns in order
+            df = df[desired_order]
+            
+            # Apply safe_excel to all string columns
+            for col in df.select_dtypes(include=['object']).columns:
+                df[col] = df[col].apply(lambda x: safe_excel(x) if isinstance(x, str) else x)
+            
+            return True, df, errors, warnings
+            
+        except Exception as e:
+            errors.append(f'Validation error: {str(e)}')
+            return False, pd.DataFrame(), errors, warnings
+
 # -------- STOCK MANAGEMENT --------
 def rebuild_combined_stock():
     """Rebuild combined stock from all supplier files"""
@@ -550,7 +710,7 @@ def rebuild_combined_stock():
             "Crown Angle", "Pavilion Depth", "Pavilion Angle", "Inscription", "Cert comment", "KeyToSymbols",
             "White Inclusion", "Black Inclusion", "Open Inclusion", "Fancy Color", "Fancy Color Intensity",
             "Fancy Color Overtone", "Country", "State", "City", "CertFile", "Diamond Video", "Diamond Image",
-            "SUPPLIER", "LOCKED", "Diamond Type"
+            "SUPPLIER", "LOCKED", "Diamond Type", "UPLOADED_AT", "Description"
         ]
         
         for col in desired_columns:
@@ -963,6 +1123,242 @@ async def get_sessions():
         "sessions": logged_in_users
     }
 
+# -------- NEW API ENDPOINTS FOR EXCEL UPLOAD --------
+@app.post("/api/upload-excel")
+async def api_upload_excel(
+    file: UploadFile = File(...),
+    telegram_id: str = Form(...),
+    username: str = Form(...)
+):
+    """API endpoint for Excel upload with flexible optional columns"""
+    try:
+        # Check if user exists and is supplier
+        user = get_user_by_username(username)
+        if not user or user.get("ROLE") != "supplier":
+            return JSONResponse(
+                status_code=403,
+                content={"success": False, "message": "Only suppliers can upload stock"}
+            )
+        
+        # Check file size
+        if file.size > 10 * 1024 * 1024:  # 10MB
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "File size exceeds 10MB limit"}
+            )
+        
+        # Check file extension
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "Only Excel files (.xlsx, .xls) are allowed"}
+            )
+        
+        # Read Excel file
+        contents = await file.read()
+        df = pd.read_excel(BytesIO(contents))
+        
+        # Validate and parse Excel
+        supplier_name = f"supplier_{username.lower()}"
+        validator = DiamondExcelValidator()
+        success, cleaned_df, errors, warnings = validator.validate_and_parse(df, supplier_name)
+        
+        if not success:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": "Validation failed",
+                    "errors": errors,
+                    "warnings": warnings
+                }
+            )
+        
+        # Save to S3
+        supplier_file = f"{SUPPLIER_STOCK_FOLDER}{supplier_name}.xlsx"
+        temp_path = f"/tmp/{supplier_name}.xlsx"
+        cleaned_df.to_excel(temp_path, index=False)
+        
+        if s3:
+            s3.upload_file(temp_path, CONFIG["AWS_BUCKET"], supplier_file)
+            logger.info(f"✅ Uploaded {len(cleaned_df)} diamonds for supplier {username}")
+        
+        # Rebuild combined stock
+        rebuild_combined_stock()
+        
+        # Calculate statistics
+        total_stones = len(cleaned_df)
+        total_carats = cleaned_df["Weight"].sum() if "Weight" in cleaned_df.columns else 0
+        total_value = (cleaned_df["Weight"] * cleaned_df["Price Per Carat"]).sum() if "Weight" in cleaned_df.columns and "Price Per Carat" in cleaned_df.columns else 0
+        
+        # Log activity
+        log_activity(user, "API_UPLOAD_STOCK", {
+            "stones": total_stones,
+            "carats": total_carats,
+            "value": total_value,
+            "warnings": warnings
+        })
+        
+        # Clean up
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "message": f"Successfully uploaded {total_stones} diamonds",
+                "stats": {
+                    "total_diamonds": total_stones,
+                    "total_carats": float(total_carats),
+                    "total_value": float(total_value),
+                    "avg_price_per_carat": float(cleaned_df["Price Per Carat"].mean()) if "Price Per Carat" in cleaned_df.columns else 0
+                },
+                "warnings": warnings
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ API upload error: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Server error: {str(e)}"}
+        )
+
+@app.get("/api/download-template")
+async def api_download_template():
+    """Download sample Excel template"""
+    try:
+        # Create sample Excel template
+        sample_data = {
+            "Stock #": ["DIA001", "DIA002", "DIA003"],
+            "Shape": ["Round", "Princess", "Oval"],
+            "Weight": [1.20, 0.90, 1.50],
+            "Color": ["D", "F", "G"],
+            "Clarity": ["IF", "VVS1", "VS1"],
+            "Price Per Carat": [12000, 9500, 7500],
+            "Lab": ["GIA", "IGI", "HRD"],
+            "Report #": ["1234567890", "2345678901", "3456789012"],
+            "Diamond Type": ["Natural", "Natural", "Lab Grown"],
+            "Description": ["Eye clean round", "Excellent princess", "Nice oval"],
+            
+            # OPTIONAL COLUMNS (can be blank)
+            "CUT": ["EX", "VG", ""],
+            "Polish": ["EX", "", "VG"],
+            "Symmetry": ["EX", "VG", ""]
+        }
+        
+        df = pd.DataFrame(sample_data)
+        
+        # Create Excel file in memory
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='Sample Stock', index=False)
+            
+            # Add instructions sheet
+            instructions_data = {
+                "Column Name": DiamondExcelValidator.ALL_COLUMNS,
+                "Required?": ["REQUIRED"] * len(DiamondExcelValidator.REQUIRED_COLUMNS) + 
+                             ["OPTIONAL"] * len(DiamondExcelValidator.OPTIONAL_COLUMNS),
+                "Description": [
+                    "Unique identifier for each diamond",
+                    "Shape of the diamond (Round, Princess, Oval, etc.)",
+                    "Weight in carats (e.g., 1.20)",
+                    "Color grade (D, E, F, etc.)",
+                    "Clarity grade (IF, VVS1, VS2, etc.)",
+                    "Price per carat in USD",
+                    "Certification lab (GIA, IGI, HRD, etc.)",
+                    "Certificate/report number",
+                    "Type of diamond (Natural, Lab Grown, etc.)",
+                    "Description or comments about the diamond",
+                    "Cut grade (EX, VG, G, F, P) - CAN BE BLANK",
+                    "Polish grade (EX, VG, G, F, P) - CAN BE BLANK",
+                    "Symmetry grade (EX, VG, G, F, P) - CAN BE BLANK"
+                ],
+                "Example": [
+                    "DIA001, STK100, 12345",
+                    "Round, Princess, Oval",
+                    "1.20, 0.90, 1.50",
+                    "D, F, G",
+                    "IF, VVS1, VS2",
+                    "12000, 9500, 7500",
+                    "GIA, IGI, HRD",
+                    "1234567890, G12345",
+                    "Natural, Lab Grown",
+                    "Eye clean, No fluorescence",
+                    "EX, VG, G",
+                    "EX, VG, G",
+                    "EX, VG, G"
+                ]
+            }
+            
+            instructions_df = pd.DataFrame(instructions_data)
+            instructions_df.to_excel(writer, sheet_name='Instructions', index=False)
+            
+            # Format column widths
+            for column in instructions_df:
+                column_length = max(
+                    instructions_df[column].astype(str).map(len).max(),
+                    len(str(column))
+                )
+                col_idx = instructions_df.columns.get_loc(column)
+                writer.sheets['Instructions'].column_dimensions[chr(65 + col_idx)].width = column_length + 2
+        
+        buffer.seek(0)
+        
+        # Return as file download
+        return FileResponse(
+            path=buffer,
+            media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            filename='diamond_stock_template.xlsx'
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Template generation error: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Error generating template: {str(e)}"}
+        )
+
+@app.get("/api/validate-excel")
+async def api_validate_excel_url(url: str):
+    """Validate Excel file from URL"""
+    try:
+        # Download file from URL
+        import requests
+        response = requests.get(url)
+        
+        if response.status_code != 200:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "Failed to download file from URL"}
+            )
+        
+        # Read Excel
+        df = pd.read_excel(BytesIO(response.content))
+        
+        # Validate
+        validator = DiamondExcelValidator()
+        success, cleaned_df, errors, warnings = validator.validate_and_parse(df, "test_supplier")
+        
+        return JSONResponse(
+            status_code=200 if success else 400,
+            content={
+                "success": success,
+                "message": "Validation completed" if success else "Validation failed",
+                "errors": errors,
+                "warnings": warnings,
+                "sample_count": len(df) if success else 0
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Validation error: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Validation error: {str(e)}"}
+        )
+
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     """Handle Telegram webhook updates"""
@@ -1003,23 +1399,6 @@ async def delete_webhook_endpoint():
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
-@app.get("/test")
-async def test_bot():
-    """Test if bot can send messages"""
-    try:
-        # Send a test message to yourself
-        test_chat_id = os.getenv("TEST_CHAT_ID", "123456789")  # Set your chat ID
-        if test_chat_id and test_chat_id != "123456789":
-            await bot.send_message(
-                chat_id=int(test_chat_id),
-                text="🤖 Bot is working! Test message."
-            )
-            return {"status": "success", "message": "Test message sent"}
-        else:
-            return {"status": "warning", "message": "TEST_CHAT_ID not set or is default"}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
 # -------- COMMAND HANDLERS --------
 @dp.message(Command("start"))
 async def start(message: types.Message):
@@ -1054,6 +1433,11 @@ async def help_command(message: types.Message):
 • 👑 **Admin** - Manage users, view all stock, approve deals
 • 💎 **Supplier** - Upload stock, view deals, analytics
 • 🥂 **Client** - Search diamonds, request deals, smart deals
+
+**For Suppliers:**
+• Optional columns (CUT, Polish, Symmetry) can be left blank
+• Required columns must have values
+• Stock # must be unique
 
 **Need help?** Contact system administrator.
 """
@@ -1861,12 +2245,16 @@ async def upload_excel_prompt(message: types.Message, user: Dict):
             "• Price Per Carat\n"
             "• Lab, Report #\n"
             "• Diamond Type, Description\n\n"
+            "**Optional Columns (can be blank):**\n"
+            "• CUT, Polish, Symmetry\n\n"
             "**File Requirements:**\n"
             "• Max size: 10MB\n"
             "• Format: .xlsx or .xls\n"
             "• No duplicate Stock #\n\n"
             "Send your file now or use '📥 Download Sample Excel' first."
         )
+        
+        log_activity(user, "UPLOAD_PROMPT")
         
     except Exception as e:
         logger.error(f"❌ Error in upload_excel_prompt: {e}")
@@ -1889,9 +2277,9 @@ async def supplier_my_stock(message: types.Message, user: Dict):
             df = pd.read_excel(local_path)
             
             total_stones = len(df)
-            total_carats = df["Weight"].sum()
-            avg_price = df["Price Per Carat"].mean()
-            total_value = (df["Weight"] * df["Price Per Carat"]).sum()
+            total_carats = df["Weight"].sum() if "Weight" in df.columns else 0
+            avg_price = df["Price Per Carat"].mean() if "Price Per Carat" in df.columns else 0
+            total_value = (df["Weight"] * df["Price Per Carat"]).sum() if "Weight" in df.columns and "Price Per Carat" in df.columns else 0
             
             stats_msg = (
                 f"📦 **Your Stock Summary**\n\n"
@@ -1899,13 +2287,14 @@ async def supplier_my_stock(message: types.Message, user: Dict):
                 f"⚖️ Total Carats: {total_carats:.2f}\n"
                 f"💰 Average Price: ${avg_price:,.2f}/ct\n"
                 f"🏦 Total Value: ${total_value:,.2f}\n\n"
-                f"**Stock Distribution:**\n"
             )
             
-            if "Shape" in df.columns:
+            if "Shape" in df.columns and not df["Shape"].empty:
                 shape_counts = df["Shape"].value_counts().head(5)
-                for shape, count in shape_counts.items():
-                    stats_msg += f"• {shape}: {count}\n"
+                if not shape_counts.empty:
+                    stats_msg += f"**Stock Distribution:**\n"
+                    for shape, count in shape_counts.items():
+                        stats_msg += f"• {shape}: {count}\n"
             
             await message.reply(stats_msg)
             
@@ -2022,23 +2411,23 @@ async def supplier_analytics(message: types.Message, user: Dict):
 async def download_sample_excel(message: types.Message, user: Dict):
     """Supplier: Download sample Excel template"""
     try:
+        # Create sample data with optional columns blank
         sample_data = {
             "Stock #": ["D001", "D002", "D003"],
             "Shape": ["Round", "Oval", "Princess"],
             "Weight": [1.0, 1.5, 2.0],
             "Color": ["D", "E", "F"],
             "Clarity": ["VVS1", "VS1", "SI1"],
-            "Cut": ["Excellent", "Very Good", "Good"],
-            "Polish": ["Excellent", "Very Good", "Good"],
-            "Symmetry": ["Excellent", "Very Good", "Good"],
+            "Price Per Carat": [10000, 8500, 7000],
             "Lab": ["GIA", "IGI", "HRD"],
             "Report #": ["1234567890", "2345678901", "3456789012"],
-            "Price Per Carat": [10000, 8500, 7000],
-            "Total Price": [10000, 12750, 14000],
             "Diamond Type": ["Natural", "Natural", "LGD"],
             "Description": ["Excellent cut round", "Nice oval diamond", "Good princess cut"],
-            "Location": ["Mumbai", "Delhi", "Bangalore"],
-            "Availability": ["Available", "Available", "Available"]
+            
+            # OPTIONAL COLUMNS - Some can be blank
+            "CUT": ["EX", "VG", ""],
+            "Polish": ["EX", "", "VG"],
+            "Symmetry": ["EX", "VG", ""]
         }
         
         df = pd.DataFrame(sample_data)
@@ -2048,11 +2437,9 @@ async def download_sample_excel(message: types.Message, user: Dict):
             df.to_excel(writer, index=False, sheet_name='Stock')
             
             instructions = pd.DataFrame({
-                "Column": [
-                    "Stock #", "Shape", "Weight", "Color", "Clarity", 
-                    "Price Per Carat", "Lab", "Report #", "Diamond Type", "Description"
-                ],
-                "Required": ["Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes"],
+                "Column": DiamondExcelValidator.ALL_COLUMNS,
+                "Required": ["Yes"] * len(DiamondExcelValidator.REQUIRED_COLUMNS) + 
+                           ["No"] * len(DiamondExcelValidator.OPTIONAL_COLUMNS),
                 "Description": [
                     "Unique identifier for each diamond",
                     "Shape of diamond (Round, Oval, Princess, etc.)",
@@ -2063,9 +2450,15 @@ async def download_sample_excel(message: types.Message, user: Dict):
                     "Certification lab (GIA, IGI, HRD, etc.)",
                     "Certificate number",
                     "Type (Natural, LGD, HPHT)",
-                    "Brief description of the diamond"
+                    "Brief description of the diamond",
+                    "Cut grade (EX, VG, G, F, P) - CAN BE BLANK",
+                    "Polish grade (EX, VG, G, F, P) - CAN BE BLANK",
+                    "Symmetry grade (EX, VG, G, F, P) - CAN BE BLANK"
                 ],
-                "Example": ["D001", "Round", "1.0", "D", "VVS1", "10000", "GIA", "123456", "Natural", "Excellent cut"]
+                "Example": [
+                    "D001", "Round", "1.0", "D", "VVS1", "10000", "GIA", "123456", "Natural", "Excellent cut",
+                    "EX", "EX", "EX"
+                ]
             })
             instructions.to_excel(writer, index=False, sheet_name='Instructions')
         
@@ -2082,7 +2475,8 @@ async def download_sample_excel(message: types.Message, user: Dict):
                 "• Fill in your actual diamond data\n"
                 "• Keep column names exactly as shown\n"
                 "• Stock # must be unique\n"
-                "• Remove sample rows before uploading"
+                "• Remove sample rows before uploading\n"
+                "• Optional columns (CUT, Polish, Symmetry) can be left blank"
             )
         )
         
@@ -2545,56 +2939,40 @@ async def handle_document(message: types.Message):
 async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str):
     """Handle supplier stock upload"""
     try:
-        required_cols = [
-            "Stock #", "Shape", "Weight", "Color", "Clarity",
-            "Price Per Carat", "Lab", "Report #", "Diamond Type", "Description"
-        ]
+        # Validate using the new validator
+        supplier_name = f"supplier_{user['USERNAME'].lower()}"
+        validator = DiamondExcelValidator()
+        success, cleaned_df, errors, warnings = validator.validate_and_parse(df, supplier_name)
         
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            await message.reply(f"❌ Missing required columns: {', '.join(missing_cols)}")
+        if not success:
+            error_msg = "❌ **Upload Failed**\n\n"
+            error_msg += "**Errors:**\n"
+            for error in errors[:5]:
+                error_msg += f"• {error}\n"
+            
+            if warnings:
+                error_msg += "\n**Warnings:**\n"
+                for warning in warnings[:3]:
+                    error_msg += f"⚠️ {warning}\n"
+            
+            await message.reply(error_msg)
             return
         
-        if df["Stock #"].isnull().any():
-            await message.reply("❌ Stock # cannot be empty")
-            return
+        # Save to S3
+        supplier_file = f"{SUPPLIER_STOCK_FOLDER}{supplier_name}.xlsx"
+        temp_supplier_path = f"/tmp/{supplier_name}.xlsx"
         
-        if df["Stock #"].duplicated().any():
-            duplicates = df[df["Stock #"].duplicated()]["Stock #"].unique()
-            await message.reply(f"❌ Duplicate Stock # found: {', '.join(duplicates[:5])}")
-            return
-        
-        df["Weight"] = pd.to_numeric(df["Weight"], errors="coerce")
-        df["Price Per Carat"] = pd.to_numeric(df["Price Per Carat"], errors="coerce")
-        
-        if df["Weight"].isnull().any() or (df["Weight"] <= 0).any():
-            await message.reply("❌ Invalid weight values")
-            return
-        
-        if df["Price Per Carat"].isnull().any() or (df["Price Per Carat"] <= 0).any():
-            await message.reply("❌ Invalid price values")
-            return
-        
-        supplier_key = user.get("SUPPLIER_KEY", f"supplier_{user['USERNAME'].lower()}")
-        df["SUPPLIER"] = supplier_key
-        df["LOCKED"] = "NO"
-        
-        supplier_file = f"{SUPPLIER_STOCK_FOLDER}{supplier_key}.xlsx"
-        temp_supplier_path = f"/tmp/{supplier_key}.xlsx"
-        
-        for col in df.select_dtypes(include="object"):
-            df[col] = df[col].map(safe_excel)
-        
-        df.to_excel(temp_supplier_path, index=False)
+        cleaned_df.to_excel(temp_supplier_path, index=False)
         
         if s3:
             s3.upload_file(temp_supplier_path, CONFIG["AWS_BUCKET"], supplier_file)
         
+        # Rebuild combined stock
         rebuild_combined_stock()
         
-        total_stones = len(df)
-        total_carats = df["Weight"].sum()
-        total_value = (df["Weight"] * df["Price Per Carat"]).sum()
+        total_stones = len(cleaned_df)
+        total_carats = cleaned_df["Weight"].sum() if "Weight" in cleaned_df.columns else 0
+        total_value = (cleaned_df["Weight"] * cleaned_df["Price Per Carat"]).sum() if "Weight" in cleaned_df.columns and "Price Per Carat" in cleaned_df.columns else 0
         
         success_msg = (
             f"✅ **Stock Upload Successful!**\n\n"
@@ -2603,18 +2981,24 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
             f"• ⚖️ Total Carats: {total_carats:.2f}\n"
             f"• 💰 Total Value: ${total_value:,.2f}\n\n"
             f"📈 **Price Range:**\n"
-            f"• Min: ${df['Price Per Carat'].min():,.0f}/ct\n"
-            f"• Avg: ${df['Price Per Carat'].mean():,.0f}/ct\n"
-            f"• Max: ${df['Price Per Carat'].max():,.0f}/ct\n\n"
+            f"• Min: ${cleaned_df['Price Per Carat'].min():,.0f}/ct\n"
+            f"• Avg: ${cleaned_df['Price Per Carat'].mean():,.0f}/ct\n"
+            f"• Max: ${cleaned_df['Price Per Carat'].max():,.0f}/ct\n\n"
             f"🔄 Combined stock has been updated."
         )
+        
+        if warnings:
+            success_msg += "\n\n**Warnings:**\n"
+            for warning in warnings[:3]:
+                success_msg += f"⚠️ {warning}\n"
         
         await message.reply(success_msg)
         
         log_activity(user, "UPLOAD_STOCK", {
             "stones": total_stones,
             "carats": total_carats,
-            "value": total_value
+            "value": total_value,
+            "warnings": warnings
         })
         
         if os.path.exists(temp_supplier_path):
@@ -2677,7 +3061,7 @@ async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.D
                 "supplier_action": "PENDING",
                 "admin_action": "PENDING",
                 "final_status": "OPEN",
-                "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+                "created_at": datetime.now(IST).strftime("%Y-%m-d %H:%M:%S")
             }
             
             if not atomic_lock_stone(stone_id):
