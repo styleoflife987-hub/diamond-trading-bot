@@ -1,0 +1,35 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  DiamondBotBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "diamond-bot-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  DiamondBotUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: telegram-bot-user
+
+  DiamondBotPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: TelegramBotS3Access
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:DeleteObject
+              - s3:ListBucket
+            Resource:
+              - !Sub "arn:aws:s3:::diamond-bot-${AWS::AccountId}"
+              - !Sub "arn:aws:s3:::diamond-bot-${AWS::AccountId}/*"
+      Users:
+        - !Ref DiamondBotUser
