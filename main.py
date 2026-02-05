@@ -2739,8 +2739,6 @@ async def handle_supplier_deal_responses(message: types.Message, user: Dict, df:
 
 # -------- MAIN ENTRY POINT --------
 if __name__ == "__main__":
-    nest_asyncio.apply()
-    
     logger.info(f"🚀 Starting Diamond Trading Bot v1.0")
     logger.info(f"📊 Python: {CONFIG['PYTHON_VERSION']}")
     logger.info(f"🌐 Port: {CONFIG['PORT']}")
