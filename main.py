@@ -51,7 +51,7 @@ def load_env_config():
         "AWS_ACCESS_KEY_ID": os.getenv("AWS_ACCESS_KEY_ID"),
         "AWS_SECRET_ACCESS_KEY": os.getenv("AWS_SECRET_ACCESS_KEY"),
         "AWS_REGION": os.getenv("AWS_REGION", "ap-south-1"),
-        "AWS_BUCKET": os.getenv("AWS_BUCKET"),
+        "AWS_BUCKET": os.getenv("AWS_BUCKET", "diamond-bucket-styleoflifes"),
         "PORT": int(os.getenv("PORT", "10000")),
         "PYTHON_VERSION": os.getenv("PYTHON_VERSION", "3.11.0"),
         "SESSION_TIMEOUT": int(os.getenv("SESSION_TIMEOUT", "3600")),
@@ -69,13 +69,13 @@ def load_env_config():
     
     # Auto-generate webhook URL if not set
     if not config["WEBHOOK_URL"]:
-        # You should set this in Render dashboard
-        config["WEBHOOK_URL"] = os.getenv("RENDER_EXTERNAL_URL", "") + "/webhook"
-        if not config["WEBHOOK_URL"]:
-            config["WEBHOOK_URL"] = "https://your-app-name.onrender.com/webhook"
+        render_url = os.getenv("RENDER_EXTERNAL_URL", "https://telegram-bot-6iil.onrender.com")
+        config["WEBHOOK_URL"] = f"{render_url}/webhook"
+        logger.info(f"Auto-generated webhook URL: {config['WEBHOOK_URL']}")
     
     logger.info(f"✅ Config loaded: BOT_TOKEN present: {bool(config['BOT_TOKEN'])}")
     logger.info(f"🌐 Webhook URL: {config['WEBHOOK_URL']}")
+    logger.info(f"📦 S3 Bucket: {config['AWS_BUCKET']}")
     
     return config
 
@@ -226,13 +226,14 @@ def touch_session(uid: int):
 def save_sessions():
     """Save sessions to S3"""
     try:
-        s3.put_object(
-            Bucket=CONFIG["AWS_BUCKET"],
-            Key=SESSION_KEY,
-            Body=json.dumps(logged_in_users, default=str),
-            ContentType="application/json"
-        )
-        logger.info(f"✅ Saved {len(logged_in_users)} active sessions")
+        if s3:
+            s3.put_object(
+                Bucket=CONFIG["AWS_BUCKET"],
+                Key=SESSION_KEY,
+                Body=json.dumps(logged_in_users, default=str),
+                ContentType="application/json"
+            )
+            logger.info(f"✅ Saved {len(logged_in_users)} active sessions")
     except Exception as e:
         logger.error(f"❌ Failed to save sessions: {e}")
 
@@ -240,10 +241,11 @@ def load_sessions():
     """Load sessions from S3"""
     global logged_in_users
     try:
-        obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=SESSION_KEY)
-        raw = json.loads(obj["Body"].read())
-        logged_in_users = {int(k): v for k, v in raw.items()}
-        logger.info(f"✅ Loaded {len(logged_in_users)} sessions from S3")
+        if s3:
+            obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=SESSION_KEY)
+            raw = json.loads(obj["Body"].read())
+            logged_in_users = {int(k): v for k, v in raw.items()}
+            logger.info(f"✅ Loaded {len(logged_in_users)} sessions from S3")
     except Exception as e:
         logger.warning(f"⚠️ No existing sessions or error loading: {e}")
         logged_in_users = {}
@@ -287,6 +289,9 @@ def is_rate_limited(uid: int) -> bool:
 def load_accounts() -> pd.DataFrame:
     """Load accounts from Excel file in S3"""
     try:
+        if not s3:
+            return pd.DataFrame(columns=["USERNAME", "PASSWORD", "ROLE", "APPROVED"])
+            
         local_path = "/tmp/accounts.xlsx"
         s3.download_file(CONFIG["AWS_BUCKET"], ACCOUNTS_KEY, local_path)
         df = pd.read_excel(local_path, dtype=str)
@@ -301,7 +306,6 @@ def load_accounts() -> pd.DataFrame:
         df["PASSWORD"] = df["PASSWORD"].apply(clean_password)
         
         logger.info(f"✅ Loaded {len(df)} accounts from S3")
-        logger.info(f"Account roles: {df['ROLE'].unique().tolist()}")
         
         return df
         
@@ -316,6 +320,10 @@ def save_accounts(df: pd.DataFrame):
         return
     
     try:
+        if not s3:
+            logger.error("❌ S3 client not available")
+            return
+            
         local_path = "/tmp/accounts.xlsx"
         df.to_excel(local_path, index=False)
         s3.upload_file(local_path, CONFIG["AWS_BUCKET"], ACCOUNTS_KEY)
@@ -329,6 +337,9 @@ def save_accounts(df: pd.DataFrame):
 def load_stock() -> pd.DataFrame:
     """Load combined stock from S3"""
     try:
+        if not s3:
+            return pd.DataFrame()
+            
         local_path = "/tmp/all_suppliers_stock.xlsx"
         s3.download_file(CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY, local_path)
         df = pd.read_excel(local_path)
@@ -342,6 +353,9 @@ def load_stock() -> pd.DataFrame:
 def log_activity(user: Dict[str, Any], action: str, details: Optional[Dict] = None):
     """Log user activity to S3"""
     try:
+        if not s3:
+            return
+            
         ist_time = datetime.now(IST)
         log_entry = {
             "date": ist_time.strftime("%Y-%m-%d"),
@@ -378,6 +392,9 @@ def log_activity(user: Dict[str, Any], action: str, details: Optional[Dict] = No
 def generate_activity_excel() -> Optional[str]:
     """Generate Excel report of all activities"""
     try:
+        if not s3:
+            return None
+            
         objs = s3.list_objects_v2(
             Bucket=CONFIG["AWS_BUCKET"],
             Prefix=ACTIVITY_LOG_FOLDER
@@ -430,6 +447,9 @@ def generate_activity_excel() -> Optional[str]:
 def save_notification(username: str, role: str, message: str):
     """Save notification for user"""
     try:
+        if not s3:
+            return
+            
         key = f"{NOTIFICATIONS_FOLDER}{role}_{username}.json"
         
         try:
@@ -457,6 +477,9 @@ def save_notification(username: str, role: str, message: str):
 def fetch_unread_notifications(username: str, role: str) -> List[Dict]:
     """Fetch unread notifications for user"""
     try:
+        if not s3:
+            return []
+            
         key = f"{NOTIFICATIONS_FOLDER}{role}_{username}.json"
         obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=key)
         data = json.loads(obj["Body"].read())
@@ -482,6 +505,9 @@ def fetch_unread_notifications(username: str, role: str) -> List[Dict]:
 def rebuild_combined_stock():
     """Rebuild combined stock from all supplier files"""
     try:
+        if not s3:
+            return
+            
         objs = s3.list_objects_v2(
             Bucket=CONFIG["AWS_BUCKET"],
             Prefix=SUPPLIER_STOCK_FOLDER
@@ -552,6 +578,9 @@ def rebuild_combined_stock():
 def atomic_lock_stone(stone_id: str) -> bool:
     """Atomically lock a stone to prevent race conditions"""
     try:
+        if not s3:
+            return False
+            
         local_path = "/tmp/current_stock.xlsx"
         s3.download_file(CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY, local_path)
         df = pd.read_excel(local_path)
@@ -620,12 +649,14 @@ def unlock_stone(stone_id: str):
             df[col] = df[col].map(safe_excel)
         
         df.to_excel(temp_path, index=False)
-        s3.upload_file(temp_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
+        
+        if s3:
+            s3.upload_file(temp_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
         
         stone_row = df[df["Stock #"] == stone_id].iloc[0]
         supplier = stone_row.get("SUPPLIER", "")
         
-        if supplier:
+        if supplier and s3:
             supplier_file = f"{SUPPLIER_STOCK_FOLDER}{supplier}.xlsx"
             try:
                 s3.download_file(CONFIG["AWS_BUCKET"], supplier_file, "/tmp/supplier_stock.xlsx")
@@ -656,30 +687,33 @@ def remove_stone_from_supplier_and_combined(stone_id: str):
             
             temp_path = "/tmp/all_suppliers_stock.xlsx"
             df.to_excel(temp_path, index=False)
-            s3.upload_file(temp_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
+            
+            if s3:
+                s3.upload_file(temp_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
             
             if os.path.exists(temp_path):
                 os.remove(temp_path)
         
-        objs = s3.list_objects_v2(
-            Bucket=CONFIG["AWS_BUCKET"],
-            Prefix=SUPPLIER_STOCK_FOLDER
-        )
-        
-        for obj in objs.get("Contents", []):
-            key = obj["Key"]
-            if not key.endswith(".xlsx"):
-                continue
+        if s3:
+            objs = s3.list_objects_v2(
+                Bucket=CONFIG["AWS_BUCKET"],
+                Prefix=SUPPLIER_STOCK_FOLDER
+            )
             
-            local_path = "/tmp/tmp_supplier.xlsx"
-            s3.download_file(CONFIG["AWS_BUCKET"], key, local_path)
-            sdf = pd.read_excel(local_path)
-            
-            if "Stock #" in sdf.columns and stone_id in sdf["Stock #"].values:
-                sdf = sdf[sdf["Stock #"] != stone_id]
-                sdf.to_excel(local_path, index=False)
-                s3.upload_file(local_path, CONFIG["AWS_BUCKET"], key)
-                break
+            for obj in objs.get("Contents", []):
+                key = obj["Key"]
+                if not key.endswith(".xlsx"):
+                    continue
+                
+                local_path = "/tmp/tmp_supplier.xlsx"
+                s3.download_file(CONFIG["AWS_BUCKET"], key, local_path)
+                sdf = pd.read_excel(local_path)
+                
+                if "Stock #" in sdf.columns and stone_id in sdf["Stock #"].values:
+                    sdf = sdf[sdf["Stock #"] != stone_id]
+                    sdf.to_excel(local_path, index=False)
+                    s3.upload_file(local_path, CONFIG["AWS_BUCKET"], key)
+                    break
         
         logger.info(f"✅ Removed stone {stone_id} from all stock files")
         
@@ -690,6 +724,9 @@ def remove_stone_from_supplier_and_combined(stone_id: str):
 def log_deal_history(deal: Dict[str, Any]):
     """Log deal to history file"""
     try:
+        if not s3:
+            return
+            
         local_path = "/tmp/deal_history.xlsx"
         
         try:
@@ -775,7 +812,7 @@ async def lifespan(app: FastAPI):
         
         # Set webhook
         webhook_url = CONFIG["WEBHOOK_URL"]
-        if webhook_url and webhook_url != "https://your-app-name.onrender.com/webhook":
+        if webhook_url and "your-app-name" not in webhook_url:
             await bot.set_webhook(
                 url=webhook_url,
                 drop_pending_updates=True,
@@ -824,26 +861,99 @@ async def lifespan(app: FastAPI):
 # -------- FASTAPI APP --------
 app = FastAPI(title="Diamond Trading Bot", lifespan=lifespan)
 
+# -------- HEALTH CHECK ENDPOINTS --------
 @app.get("/")
 async def root():
     return {
         "status": "online",
         "service": "Diamond Trading Bot",
+        "version": "1.0",
         "bot_started": BOT_STARTED,
         "webhook_url": CONFIG["WEBHOOK_URL"],
         "timestamp": datetime.now().isoformat(),
-        "active_sessions": len(logged_in_users)
+        "active_sessions": len(logged_in_users),
+        "aws_connected": s3 is not None,
+        "bucket": CONFIG["AWS_BUCKET"]
     }
 
 @app.get("/health")
 async def health_check():
+    """Health check endpoint for Render monitoring"""
+    status = "healthy" if BOT_STARTED else "starting"
+    
+    # Test AWS connection if available
+    aws_status = "connected" if s3 else "disconnected"
+    bucket_accessible = False
+    
+    if s3:
+        try:
+            s3.head_bucket(Bucket=CONFIG["AWS_BUCKET"])
+            bucket_accessible = True
+        except:
+            pass
+    
     return {
-        "status": "healthy" if BOT_STARTED else "starting",
+        "status": status,
         "bot": "running" if BOT_STARTED else "stopped",
         "webhook": "set" if CONFIG["WEBHOOK_URL"] else "not set",
+        "aws": aws_status,
+        "bucket_accessible": bucket_accessible,
         "active_users": len(logged_in_users),
         "timestamp": datetime.now().isoformat()
     }
+
+@app.get("/ping")
+async def ping():
+    """Simple ping endpoint"""
+    return {
+        "status": "pong",
+        "service": "Diamond Trading Bot",
+        "timestamp": datetime.now().isoformat(),
+        "bot_status": "running" if BOT_STARTED else "starting",
+        "active_users": len(logged_in_users),
+        "message": "Bot is alive and responding!"
+    }
+
+@app.get("/status")
+async def status_check():
+    """Comprehensive status check"""
+    status = {
+        "service": "Diamond Trading Bot",
+        "status": "healthy" if BOT_STARTED else "starting",
+        "timestamp": datetime.now().isoformat(),
+        "version": "1.0",
+        
+        "bot": {
+            "started": BOT_STARTED,
+            "token_set": bool(CONFIG.get("BOT_TOKEN")),
+            "webhook_url": CONFIG.get("WEBHOOK_URL"),
+            "active_sessions": len(logged_in_users)
+        },
+        
+        "aws": {
+            "s3_connected": s3 is not None,
+            "bucket": CONFIG.get("AWS_BUCKET"),
+            "region": CONFIG.get("AWS_REGION"),
+            "bucket_accessible": None
+        },
+        
+        "system": {
+            "python_version": CONFIG.get("PYTHON_VERSION"),
+            "port": CONFIG.get("PORT"),
+            "session_timeout": CONFIG.get("SESSION_TIMEOUT")
+        }
+    }
+    
+    # Test AWS connection
+    if s3:
+        try:
+            s3.list_objects_v2(Bucket=CONFIG["AWS_BUCKET"], MaxKeys=1)
+            status["aws"]["bucket_accessible"] = True
+        except Exception as e:
+            status["aws"]["bucket_accessible"] = False
+            status["aws"]["error"] = str(e)
+    
+    return status
 
 @app.get("/sessions")
 async def get_sessions():
@@ -872,7 +982,7 @@ async def set_webhook_endpoint():
     """Manual endpoint to set webhook (for testing)"""
     try:
         webhook_url = CONFIG["WEBHOOK_URL"]
-        if not webhook_url or webhook_url == "https://your-app-name.onrender.com/webhook":
+        if not webhook_url or "your-app-name" in webhook_url:
             return {"status": "error", "error": "Please set a valid WEBHOOK_URL in environment variables"}
         
         await bot.set_webhook(
@@ -1428,13 +1538,14 @@ async def handle_deal_flow(message: types.Message, state: Dict):
             user_state.pop(uid, None)
             return
         
-        deal_key = f"{DEALS_FOLDER}{deal_id}.json"
-        s3.put_object(
-            Bucket=CONFIG["AWS_BUCKET"],
-            Key=deal_key,
-            Body=json.dumps(deal, indent=2),
-            ContentType="application/json"
-        )
+        if s3:
+            deal_key = f"{DEALS_FOLDER}{deal_id}.json"
+            s3.put_object(
+                Bucket=CONFIG["AWS_BUCKET"],
+                Key=deal_key,
+                Body=json.dumps(deal, indent=2),
+                ContentType="application/json"
+            )
         
         log_deal_history(deal)
         
@@ -1764,45 +1875,53 @@ async def upload_excel_prompt(message: types.Message, user: Dict):
 async def supplier_my_stock(message: types.Message, user: Dict):
     """Supplier: View own stock"""
     try:
+        if not s3:
+            await message.reply("❌ AWS connection not available.")
+            return
+            
         supplier_key = user.get("SUPPLIER_KEY", f"supplier_{user['USERNAME'].lower()}")
         stock_key = f"{SUPPLIER_STOCK_FOLDER}{supplier_key}.xlsx"
         
-        local_path = "/tmp/my_stock.xlsx"
-        s3.download_file(CONFIG["AWS_BUCKET"], stock_key, local_path)
-        
-        df = pd.read_excel(local_path)
-        
-        total_stones = len(df)
-        total_carats = df["Weight"].sum()
-        avg_price = df["Price Per Carat"].mean()
-        total_value = (df["Weight"] * df["Price Per Carat"]).sum()
-        
-        stats_msg = (
-            f"📦 **Your Stock Summary**\n\n"
-            f"💎 Total Diamonds: {total_stones}\n"
-            f"⚖️ Total Carats: {total_carats:.2f}\n"
-            f"💰 Average Price: ${avg_price:,.2f}/ct\n"
-            f"🏦 Total Value: ${total_value:,.2f}\n\n"
-            f"**Stock Distribution:**\n"
-        )
-        
-        if "Shape" in df.columns:
-            shape_counts = df["Shape"].value_counts().head(5)
-            for shape, count in shape_counts.items():
-                stats_msg += f"• {shape}: {count}\n"
-        
-        await message.reply(stats_msg)
-        
-        await message.reply_document(
-            types.FSInputFile(local_path),
-            caption=f"📦 Your Stock File ({total_stones} diamonds)"
-        )
-        
-        log_activity(user, "VIEW_MY_STOCK")
-        
+        try:
+            local_path = "/tmp/my_stock.xlsx"
+            s3.download_file(CONFIG["AWS_BUCKET"], stock_key, local_path)
+            
+            df = pd.read_excel(local_path)
+            
+            total_stones = len(df)
+            total_carats = df["Weight"].sum()
+            avg_price = df["Price Per Carat"].mean()
+            total_value = (df["Weight"] * df["Price Per Carat"]).sum()
+            
+            stats_msg = (
+                f"📦 **Your Stock Summary**\n\n"
+                f"💎 Total Diamonds: {total_stones}\n"
+                f"⚖️ Total Carats: {total_carats:.2f}\n"
+                f"💰 Average Price: ${avg_price:,.2f}/ct\n"
+                f"🏦 Total Value: ${total_value:,.2f}\n\n"
+                f"**Stock Distribution:**\n"
+            )
+            
+            if "Shape" in df.columns:
+                shape_counts = df["Shape"].value_counts().head(5)
+                for shape, count in shape_counts.items():
+                    stats_msg += f"• {shape}: {count}\n"
+            
+            await message.reply(stats_msg)
+            
+            await message.reply_document(
+                types.FSInputFile(local_path),
+                caption=f"📦 Your Stock File ({total_stones} diamonds)"
+            )
+            
+            log_activity(user, "VIEW_MY_STOCK")
+            
+        except Exception as e:
+            logger.error(f"❌ Error loading supplier stock: {e}")
+            await message.reply("❌ You haven't uploaded any stock yet or there was an error loading it.")
     except Exception as e:
         logger.error(f"❌ Error in supplier_my_stock: {e}")
-        await message.reply("❌ You haven't uploaded any stock yet.")
+        await message.reply("❌ Failed to load stock data.")
     finally:
         if os.path.exists("/tmp/my_stock.xlsx"):
             os.remove("/tmp/my_stock.xlsx")
@@ -2139,6 +2258,10 @@ async def request_deal_start(message: types.Message, user: Dict):
 async def view_deals(message: types.Message, user: Dict):
     """View deals based on user role"""
     try:
+        if not s3:
+            await message.reply("❌ AWS connection not available.")
+            return
+            
         objs = s3.list_objects_v2(
             Bucket=CONFIG["AWS_BUCKET"],
             Prefix=DEALS_FOLDER
@@ -2325,6 +2448,10 @@ async def confirm_delete_stock(callback: types.CallbackQuery):
             await callback.answer("❌ Admin only", show_alert=True)
             return
         
+        if not s3:
+            await callback.answer("❌ AWS connection not available", show_alert=True)
+            return
+        
         objs = s3.list_objects_v2(
             Bucket=CONFIG["AWS_BUCKET"],
             Prefix=SUPPLIER_STOCK_FOLDER
@@ -2459,7 +2586,9 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
             df[col] = df[col].map(safe_excel)
         
         df.to_excel(temp_supplier_path, index=False)
-        s3.upload_file(temp_supplier_path, CONFIG["AWS_BUCKET"], supplier_file)
+        
+        if s3:
+            s3.upload_file(temp_supplier_path, CONFIG["AWS_BUCKET"], supplier_file)
         
         rebuild_combined_stock()
         
@@ -2555,13 +2684,14 @@ async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.D
                 failed_deals.append(f"{stone_id}: Lock failed")
                 continue
             
-            deal_key = f"{DEALS_FOLDER}{deal_id}.json"
-            s3.put_object(
-                Bucket=CONFIG["AWS_BUCKET"],
-                Key=deal_key,
-                Body=json.dumps(deal, indent=2),
-                ContentType="application/json"
-            )
+            if s3:
+                deal_key = f"{DEALS_FOLDER}{deal_id}.json"
+                s3.put_object(
+                    Bucket=CONFIG["AWS_BUCKET"],
+                    Key=deal_key,
+                    Body=json.dumps(deal, indent=2),
+                    ContentType="application/json"
+                )
             
             log_deal_history(deal)
             
@@ -2619,6 +2749,9 @@ async def handle_admin_deal_approvals(message: types.Message, user: Dict, df: pd
                 continue
             
             try:
+                if not s3:
+                    continue
+                    
                 deal_key = f"{DEALS_FOLDER}{deal_id}.json"
                 deal_data = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=deal_key)
                 deal = json.loads(deal_data["Body"].read())
@@ -2696,6 +2829,9 @@ async def handle_supplier_deal_responses(message: types.Message, user: Dict, df:
                 continue
             
             try:
+                if not s3:
+                    continue
+                    
                 deal_key = f"{DEALS_FOLDER}{deal_id}.json"
                 deal_data = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=deal_key)
                 deal = json.loads(deal_data["Body"].read())
@@ -2766,6 +2902,17 @@ if __name__ == "__main__":
     logger.info(f"🌐 Port: {CONFIG['PORT']}")
     logger.info(f"🔗 Webhook URL: {CONFIG['WEBHOOK_URL']}")
     logger.info(f"🤖 Bot Token: {'Set' if CONFIG['BOT_TOKEN'] else 'Not Set'}")
+    logger.info(f"📦 S3 Bucket: {CONFIG['AWS_BUCKET']}")
+    
+    # Check if all required environment variables are set
+    required_vars = ["BOT_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_BUCKET"]
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    
+    if missing_vars:
+        logger.error(f"❌ Missing required environment variables: {missing_vars}")
+        logger.error("Please set these in your Render environment variables.")
+    else:
+        logger.info("✅ All required environment variables are set")
     
     uvicorn.run(
         app,
@@ -2773,4 +2920,4 @@ if __name__ == "__main__":
         port=CONFIG["PORT"],
         reload=False,
         log_level="info"
-)
+    )
