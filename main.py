@@ -55,7 +55,6 @@ def load_env_config():
         "AWS_REGION": os.getenv("AWS_REGION", "ap-south-1"),
         "AWS_BUCKET": os.getenv("AWS_BUCKET", "diamond-bucket-styleoflifes"),
         "PORT": int(os.getenv("PORT", "8000")),
-        "PYTHON_VERSION": os.getenv("PYTHON_VERSION", "3.11.0"),
         "SESSION_TIMEOUT": int(os.getenv("SESSION_TIMEOUT", "3600")),
         "RATE_LIMIT": int(os.getenv("RATE_LIMIT", "5")),
         "RATE_LIMIT_WINDOW": int(os.getenv("RATE_LIMIT_WINDOW", "10")),
@@ -377,9 +376,13 @@ def load_stock(cached=True) -> pd.DataFrame:
             return pd.DataFrame()
             
         local_path = "/tmp/all_suppliers_stock.xlsx"
-        s3.download_file(CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY, local_path)
-        df = pd.read_excel(local_path)
-        logger.info(f"✅ Loaded {len(df)} stock items from S3")
+        try:
+            s3.download_file(CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY, local_path)
+            df = pd.read_excel(local_path)
+            logger.info(f"✅ Loaded {len(df)} stock items from S3")
+        except Exception as e:
+            logger.warning(f"⚠️ No combined stock file found: {e}")
+            return pd.DataFrame()
         
         # Cache the data
         startup_cache["stock"] = df
@@ -522,11 +525,15 @@ def fetch_unread_notifications(username: str, role: str) -> List[Dict]:
             return []
             
         key = f"{NOTIFICATIONS_FOLDER}{role}_{username}.json"
-        obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=key)
-        data = json.loads(obj["Body"].read())
+        try:
+            obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=key)
+            data = json.loads(obj["Body"].read())
+        except:
+            return []
         
         unread = [n for n in data if not n.get("read")]
         
+        # Mark as read
         for n in data:
             n["read"] = True
         
@@ -669,17 +676,10 @@ class DiamondExcelValidator:
                     pass
             
             # Reorder columns for consistency
-            desired_order = ['Stock #', 'Availability', 'Shape', 'Weight', 'Color', 'Clarity', 
-                           'Cut', 'Polish', 'Symmetry', 'Fluorescence Color', 'Measurements', 
-                           'Shade', 'Milky', 'Eye Clean', 'Lab', 'Report #', 'Location', 
-                           'Treatment', 'Discount', 'Price Per Carat', 'Final Price', 'Depth %', 
-                           'Table %', 'Girdle Thin', 'Girdle Thick', 'Girdle %', 'Girdle Condition', 
-                           'Culet Size', 'Culet Condition', 'Crown Height', 'Crown Angle', 
-                           'Pavilion Depth', 'Pavilion Angle', 'Inscription', 'Cert comment', 
-                           'KeyToSymbols', 'White Inclusion', 'Black Inclusion', 'Open Inclusion', 
-                           'Fancy Color', 'Fancy Color Intensity', 'Fancy Color Overtone', 
-                           'Country', 'State', 'City', 'CertFile', 'Diamond Video', 'Diamond Image', 
-                           'SUPPLIER', 'LOCKED', 'Diamond Type', 'UPLOADED_AT', 'Description']
+            desired_order = ['Stock #', 'Shape', 'Weight', 'Color', 'Clarity', 
+                           'Price Per Carat', 'Lab', 'Report #', 'Diamond Type', 
+                           'Description', 'CUT', 'Polish', 'Symmetry',
+                           'SUPPLIER', 'LOCKED', 'UPLOADED_AT']
             
             # Add missing columns with empty values
             for col in desired_order:
@@ -712,6 +712,20 @@ def rebuild_combined_stock():
         )
         
         if "Contents" not in objs:
+            # No supplier files, create empty combined stock
+            empty_df = pd.DataFrame(columns=[
+                'Stock #', 'Shape', 'Weight', 'Color', 'Clarity', 
+                'Price Per Carat', 'Lab', 'Report #', 'Diamond Type', 
+                'Description', 'CUT', 'Polish', 'Symmetry',
+                'SUPPLIER', 'LOCKED', 'UPLOADED_AT'
+            ])
+            
+            local_path = "/tmp/all_suppliers_stock.xlsx"
+            empty_df.to_excel(local_path, index=False)
+            s3.upload_file(local_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
+            
+            if os.path.exists(local_path):
+                os.remove(local_path)
             return
         
         dfs = []
@@ -741,24 +755,16 @@ def rebuild_combined_stock():
         final_df = pd.concat(dfs, ignore_index=True)
         
         desired_columns = [
-            "Stock #", "Availability", "Shape", "Weight", "Color", "Clarity", "Cut", "Polish", "Symmetry",
-            "Fluorescence Color", "Measurements", "Shade", "Milky", "Eye Clean", "Lab", "Report #", "Location",
-            "Treatment", "Discount", "Price Per Carat", "Final Price", "Depth %", "Table %", "Girdle Thin",
-            "Girdle Thick", "Girdle %", "Girdle Condition", "Culet Size", "Culet Condition", "Crown Height",
-            "Crown Angle", "Pavilion Depth", "Pavilion Angle", "Inscription", "Cert comment", "KeyToSymbols",
-            "White Inclusion", "Black Inclusion", "Open Inclusion", "Fancy Color", "Fancy Color Intensity",
-            "Fancy Color Overtone", "Country", "State", "City", "CertFile", "Diamond Video", "Diamond Image",
-            "SUPPLIER", "LOCKED", "Diamond Type", "UPLOADED_AT", "Description"
+            'Stock #', 'Shape', 'Weight', 'Color', 'Clarity', 
+            'Price Per Carat', 'Lab', 'Report #', 'Diamond Type', 
+            'Description', 'CUT', 'Polish', 'Symmetry',
+            'SUPPLIER', 'LOCKED', 'UPLOADED_AT'
         ]
         
         for col in desired_columns:
             if col not in final_df.columns:
                 final_df[col] = ""
         
-        if "Diamond Type" not in final_df.columns:
-            final_df["Diamond Type"] = "Unknown"
-        
-        final_df["LOCKED"] = final_df.get("LOCKED", "NO")
         final_df = final_df[desired_columns]
         
         local_path = "/tmp/all_suppliers_stock.xlsx"
@@ -783,9 +789,7 @@ def atomic_lock_stone(stone_id: str) -> bool:
         if not s3:
             return False
             
-        local_path = "/tmp/current_stock.xlsx"
-        s3.download_file(CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY, local_path)
-        df = pd.read_excel(local_path)
+        df = load_stock()
         
         if df.empty or "Stock #" not in df.columns or "LOCKED" not in df.columns:
             return False
@@ -823,9 +827,12 @@ def atomic_lock_stone(stone_id: str) -> bool:
             except Exception as e:
                 logger.error(f"Failed to update supplier file: {e}")
         
-        for path in [local_path, temp_path, "/tmp/supplier_stock.xlsx"]:
+        for path in [temp_path, "/tmp/supplier_stock.xlsx"]:
             if os.path.exists(path):
-                os.remove(path)
+                try:
+                    os.remove(path)
+                except:
+                    pass
         
         logger.info(f"✅ Locked stone: {stone_id}")
         
@@ -877,7 +884,10 @@ def unlock_stone(stone_id: str):
         
         for path in [temp_path, "/tmp/supplier_stock.xlsx"]:
             if os.path.exists(path):
-                os.remove(path)
+                try:
+                    os.remove(path)
+                except:
+                    pass
         
         logger.info(f"✅ Unlocked stone: {stone_id}")
         
@@ -973,7 +983,10 @@ def log_deal_history(deal: Dict[str, Any]):
         logger.error(f"❌ Failed to log deal history: {e}")
     finally:
         if os.path.exists(local_path):
-            os.remove(local_path)
+            try:
+                os.remove(local_path)
+            except:
+                pass
 
 # -------- BACKGROUND TASKS --------
 async def session_cleanup_loop():
@@ -1195,7 +1208,7 @@ async def status_check():
         },
         
         "system": {
-            "python_version": CONFIG.get("PYTHON_VERSION"),
+            "python_version": "3.11.0",
             "port": CONFIG.get("PORT"),
             "session_timeout": CONFIG.get("SESSION_TIMEOUT"),
             "cache_loaded": startup_cache["accounts"] is not None,
@@ -1922,28 +1935,8 @@ async def handle_all_messages(message: types.Message):
             )
             
     except Exception as e:
-        # Enhanced error logging
-        error_details = {
-            "user_id": message.from_user.id if message else "unknown",
-            "text": message.text if message and message.text else "no text",
-            "state": user_state.get(message.from_user.id) if message else "no state",
-            "logged_in": bool(get_logged_user(message.from_user.id)) if message else False
-        }
-        
         logger.error(f"❌ Error in handle_all_messages: {e}", exc_info=True)
-        logger.error(f"📋 Error details: {json.dumps(error_details, default=str)}")
-        
-        # Check for specific errors
-        error_msg = "❌ An error occurred. Please try again."
-        
-        if "NoSuchBucket" in str(e) or "Access Denied" in str(e):
-            error_msg = "❌ Storage connection error. Please contact admin."
-        elif "pd.read_excel" in str(e):
-            error_msg = "❌ Excel file error. Please check the file format."
-        elif "KeyError" in str(e):
-            error_msg = "❌ Data format error. Please use /fix to reset."
-        
-        await message.reply(f"{error_msg}\n\nUse /fix to reset your state.")
+        await message.reply(f"❌ An error occurred. Use /fix to reset.")
 
 # -------- SEARCH FLOW HANDLER --------
 async def handle_search_flow(message: types.Message, state: Dict):
@@ -1953,8 +1946,6 @@ async def handle_search_flow(message: types.Message, state: Dict):
         text = message.text.strip().lower() if message.text else ""
         current_step = state["step"]
         search = state.setdefault("search", {})
-        
-        logger.info(f"Search flow - Step: {current_step}, Text: {text}")
         
         if current_step == "search_carat":
             if not text:
@@ -3154,7 +3145,7 @@ async def cancel_delete(callback: types.CallbackQuery):
 # -------- DOCUMENT HANDLER (FIXED) --------
 @dp.message(F.document)
 async def handle_document(message: types.Message):
-    """Handle document uploads (Excel files) - FIXED VERSION"""
+    """Handle document uploads (Excel files)"""
     try:
         uid = message.from_user.id
         user = get_logged_user(uid)
@@ -3172,7 +3163,7 @@ async def handle_document(message: types.Message):
             await message.reply("❌ Only Excel files (.xlsx, .xls) are allowed.")
             return
         
-        # IMPORTANT: Send "Processing..." message immediately
+        # Send processing message
         processing_msg = await message.reply("🔄 Processing your Excel file...")
         
         # Download file
@@ -3191,8 +3182,8 @@ async def handle_document(message: types.Message):
         state = user_state.get(uid, {})
         user_role = user["ROLE"]
         
-        # Check if it's a supplier uploading stock (MOST COMMON CASE)
-        if user_role == "supplier" and not state.get("step") == "bulk_deal_excel":
+        # Check if it's a supplier uploading stock
+        if user_role == "supplier":
             await handle_supplier_stock_upload(message, user, df, temp_path, processing_msg)
             
         elif user_role == "client" and state.get("step") == "bulk_deal_excel":
@@ -3205,7 +3196,7 @@ async def handle_document(message: types.Message):
             await handle_supplier_deal_responses(message, user, df, temp_path, processing_msg)
             
         else:
-            await processing_msg.edit_text("❌ Invalid file format or action. Please use the correct template.")
+            await processing_msg.edit_text("❌ Invalid file format or action.")
             
     except Exception as e:
         logger.error(f"❌ Error in handle_document: {e}", exc_info=True)
@@ -3213,9 +3204,12 @@ async def handle_document(message: types.Message):
         
     finally:
         if os.path.exists(temp_path):
-            os.remove(temp_path)
+            try:
+                os.remove(temp_path)
+            except:
+                pass
 
-# -------- UPDATED SUPPLIER STOCK UPLOAD HANDLER --------
+# -------- SUPPLIER STOCK UPLOAD HANDLER --------
 async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str, processing_msg: types.Message):
     """Handle supplier stock upload - IMPROVED WITH DETAILED RESPONSE"""
     try:
@@ -3248,6 +3242,7 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
         
         if s3:
             s3.upload_file(temp_supplier_path, CONFIG["AWS_BUCKET"], supplier_file)
+            logger.info(f"✅ Uploaded {len(cleaned_df)} diamonds for supplier {supplier_name}")
         
         # Rebuild combined stock
         rebuild_combined_stock()
@@ -3287,7 +3282,7 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
         # Send the success message
         await processing_msg.edit_text(success_msg)
         
-        # Also send as a new message for better formatting
+        # Also send a confirmation message
         await message.reply(
             f"📦 **Your stock has been saved!**\n"
             f"View it using '📦 My Stock' button.\n"
@@ -3307,7 +3302,6 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
     except Exception as e:
         logger.error(f"❌ Error in handle_supplier_stock_upload: {e}", exc_info=True)
         await processing_msg.edit_text(f"❌ Failed to upload stock: {str(e)}")
-        await message.reply("Please try again or use /fix if the problem persists.")
 
 async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str, processing_msg: types.Message):
     """Handle client bulk deal requests"""
@@ -3583,7 +3577,7 @@ async def handle_supplier_deal_responses(message: types.Message, user: Dict, df:
 # -------- MAIN ENTRY POINT --------
 if __name__ == "__main__":
     logger.info(f"🚀 Starting Diamond Trading Bot v1.0")
-    logger.info(f"📊 Python: {CONFIG['PYTHON_VERSION']}")
+    logger.info(f"📊 Python: 3.11.0")
     logger.info(f"🌐 Port: {CONFIG['PORT']}")
     logger.info(f"🔗 Webhook URL: {CONFIG['WEBHOOK_URL']}")
     logger.info(f"🤖 Bot Token: {'Set' if CONFIG['BOT_TOKEN'] else 'Not Set'}")
