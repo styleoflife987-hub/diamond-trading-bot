@@ -643,7 +643,6 @@ class DiamondExcelValidator:
             if 'Price Per Carat' in df.columns:
                 try:
                     df['Price Per Carat'] = pd.to_numeric(df['Price Per Carat'], errors='coerce')
-                    # FIXED LINE 608: Changed "Price Per Carat" to 'Price Per Carat'
                     invalid_prices = df['Price Per Carat'].isna() | (df['Price Per Carat'] <= 0)
                     if invalid_prices.any():
                         invalid_count = invalid_prices.sum()
@@ -1224,6 +1223,61 @@ async def get_sessions():
         "sessions": logged_in_users
     }
 
+@app.get("/debug")
+async def debug_info():
+    """Debug endpoint to check system status"""
+    try:
+        # Check S3 connection
+        s3_status = "connected" if s3 else "disconnected"
+        bucket_accessible = False
+        s3_error = None
+        
+        if s3:
+            try:
+                s3.head_bucket(Bucket=CONFIG["AWS_BUCKET"])
+                bucket_accessible = True
+            except Exception as e:
+                bucket_accessible = False
+                s3_error = str(e)
+        
+        # Check bot status
+        webhook_info = {}
+        try:
+            webhook_info = await bot.get_webhook_info()
+        except Exception as e:
+            webhook_info = {"error": str(e)}
+        
+        return {
+            "status": "debug",
+            "timestamp": datetime.now().isoformat(),
+            "bot_started": BOT_STARTED,
+            "webhook": webhook_info,
+            "s3": {
+                "status": s3_status,
+                "bucket": CONFIG["AWS_BUCKET"],
+                "accessible": bucket_accessible,
+                "error": s3_error
+            },
+            "cache": {
+                "accounts_loaded": startup_cache["accounts"] is not None,
+                "stock_loaded": startup_cache["stock"] is not None,
+                "last_loaded": startup_cache["last_loaded"],
+                "age_seconds": time.time() - startup_cache["last_loaded"] if startup_cache["last_loaded"] > 0 else 0
+            },
+            "users": {
+                "logged_in_count": len(logged_in_users),
+                "user_state_count": len(user_state),
+                "rate_limit_count": len(user_rate_limit)
+            },
+            "config": {
+                "webhook_url": CONFIG["WEBHOOK_URL"],
+                "bot_token_set": bool(CONFIG["BOT_TOKEN"]),
+                "aws_keys_set": bool(CONFIG["AWS_ACCESS_KEY_ID"]) and bool(CONFIG["AWS_SECRET_ACCESS_KEY"])
+            }
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
 # -------- NEW API ENDPOINTS FOR EXCEL UPLOAD --------
 @app.post("/api/upload-excel")
 async def api_upload_excel(
@@ -1487,7 +1541,8 @@ async def start(message: types.Message):
             "💎 Welcome to Diamond Trading Bot!\n\n"
             "Use /login to sign in\n"
             "Use /createaccount to register\n"
-            "Use /help for assistance",
+            "Use /help for assistance\n"
+            "Use /fix to reset if stuck",
             reply_markup=types.ReplyKeyboardRemove()
         )
         logger.info(f"✅ /start command handled for user {message.from_user.id}")
@@ -1507,6 +1562,7 @@ async def help_command(message: types.Message):
 • /createaccount - Register new account
 • /logout - Logout from current session
 • /reset - Reset login state
+• /fix - Fix stuck state and reset cache
 
 **Roles:**
 • 👑 **Admin** - Manage users, view all stock, approve deals
@@ -1615,13 +1671,75 @@ async def reset_state_command(message: types.Message):
     except Exception as e:
         logger.error(f"❌ Error in reset_state_command handler: {e}")
 
+@dp.message(Command("fix"))
+async def fix_state_command(message: types.Message):
+    """Reset user state and clear cache"""
+    try:
+        uid = message.from_user.id
+        user_state.pop(uid, None)
+        
+        # Clear rate limit
+        user_rate_limit.pop(uid, None)
+        
+        # Force reload cache
+        global startup_cache
+        startup_cache["accounts"] = None
+        startup_cache["stock"] = None
+        startup_cache["last_loaded"] = 0
+        
+        await message.reply(
+            "🔄 State cleared and cache reset.\n"
+            "Please try your command again."
+        )
+        logger.info(f"Fixed state for user {uid}")
+        
+    except Exception as e:
+        logger.error(f"Fix command error: {e}")
+        await message.reply("❌ Could not fix state.")
+
+@dp.message(Command("mystate"))
+async def show_my_state(message: types.Message):
+    """Show current user state"""
+    try:
+        uid = message.from_user.id
+        state = user_state.get(uid)
+        user = get_logged_user(uid)
+        
+        state_info = json.dumps(state, default=str, indent=2) if state else "No state"
+        user_info = json.dumps(user, default=str, indent=2) if user else "Not logged in"
+        
+        await message.reply(
+            f"👤 **Your State:**\n"
+            f"```\n{state_info}\n```\n\n"
+            f"🔐 **Logged In:**\n"
+            f"```\n{user_info}\n```"
+        )
+    except Exception as e:
+        await message.reply(f"❌ Error: {e}")
+
+@dp.message(Command("testdata"))
+async def test_data_loading(message: types.Message):
+    """Test data loading"""
+    try:
+        accounts_df = load_accounts()
+        stock_df = load_stock()
+        
+        await message.reply(
+            f"📊 **Data Load Test:**\n\n"
+            f"✅ Accounts: {len(accounts_df)} rows\n"
+            f"✅ Stock: {len(stock_df)} rows\n"
+            f"🕒 Cache age: {time.time() - startup_cache['last_loaded']:.0f} seconds"
+        )
+    except Exception as e:
+        await message.reply(f"❌ Data load failed: {e}")
+
 # -------- STATE HANDLER --------
 @dp.message()
 async def handle_all_messages(message: types.Message):
     """Main message handler for state-based flows"""
     try:
         uid = message.from_user.id
-        text = message.text.strip()
+        text = message.text.strip() if message.text else ""
         
         logger.info(f"📩 Received message from {uid}: {text}")
         
@@ -1805,245 +1923,312 @@ async def handle_all_messages(message: types.Message):
             )
             
     except Exception as e:
+        # Enhanced error logging
+        error_details = {
+            "user_id": message.from_user.id if message else "unknown",
+            "text": message.text if message and message.text else "no text",
+            "state": user_state.get(message.from_user.id) if message else "no state",
+            "logged_in": bool(get_logged_user(message.from_user.id)) if message else False
+        }
+        
         logger.error(f"❌ Error in handle_all_messages: {e}", exc_info=True)
-        await message.reply("❌ An error occurred. Please try again.")
+        logger.error(f"📋 Error details: {json.dumps(error_details, default=str)}")
+        
+        # Check for specific errors
+        error_msg = "❌ An error occurred. Please try again."
+        
+        if "NoSuchBucket" in str(e) or "Access Denied" in str(e):
+            error_msg = "❌ Storage connection error. Please contact admin."
+        elif "pd.read_excel" in str(e):
+            error_msg = "❌ Excel file error. Please check the file format."
+        elif "KeyError" in str(e):
+            error_msg = "❌ Data format error. Please use /fix to reset."
+        
+        await message.reply(f"{error_msg}\n\nUse /fix to reset your state.")
 
 # -------- SEARCH FLOW HANDLER --------
 async def handle_search_flow(message: types.Message, state: Dict):
     """Handle diamond search flow"""
-    uid = message.from_user.id
-    text = message.text.strip().lower()
-    current_step = state["step"]
-    search = state.setdefault("search", {})
-    
-    if current_step == "search_carat":
-        search["carat"] = text
-        state["step"] = "search_shape"
-        await message.reply("Enter Shape(s) (e.g., round, oval) or 'any':")
+    try:
+        uid = message.from_user.id
+        text = message.text.strip().lower() if message.text else ""
+        current_step = state["step"]
+        search = state.setdefault("search", {})
         
-    elif current_step == "search_shape":
-        search["shape"] = text
-        state["step"] = "search_color"
-        await message.reply("Enter Color(s) (e.g., d, e, f) or 'any':")
+        logger.info(f"Search flow - Step: {current_step}, Text: {text}")
         
-    elif current_step == "search_color":
-        search["color"] = text
-        state["step"] = "search_clarity"
-        await message.reply("Enter Clarity(ies) (e.g., vs, vvs) or 'any':")
-        
-    elif current_step == "search_clarity":
-        search["clarity"] = text
-        
-        user = get_logged_user(uid)
-        if not user:
-            await message.reply("❌ Session expired. Please login again.")
-            user_state.pop(uid, None)
-            return
-        
-        df = load_stock()
-        if df.empty:
-            await message.reply("❌ No diamonds available in stock.")
-            user_state.pop(uid, None)
-            return
-        
-        filtered_df = df.copy()
-        
-        # Carat filter
-        if search["carat"] != "any":
-            try:
-                if "-" in search["carat"]:
-                    min_carat, max_carat = map(float, search["carat"].split("-"))
-                    filtered_df = filtered_df[
-                        (filtered_df["Weight"] >= min_carat) & 
-                        (filtered_df["Weight"] <= max_carat)
-                    ]
-                else:
-                    target_carat = float(search["carat"])
-                    filtered_df = filtered_df[
-                        (filtered_df["Weight"] >= target_carat * 0.9) & 
-                        (filtered_df["Weight"] <= target_carat * 1.1)
-                    ]
-            except:
-                await message.reply("❌ Invalid carat format. Use like '1.5' or '1-2'")
+        if current_step == "search_carat":
+            if not text:
+                await message.reply("Please enter carat weight")
+                return
+            search["carat"] = text
+            state["step"] = "search_shape"
+            await message.reply("Enter Shape(s) (e.g., round, oval) or 'any':")
+            
+        elif current_step == "search_shape":
+            if not text:
+                await message.reply("Please enter shape")
+                return
+            search["shape"] = text
+            state["step"] = "search_color"
+            await message.reply("Enter Color(s) (e.g., d, e, f) or 'any':")
+            
+        elif current_step == "search_color":
+            if not text:
+                await message.reply("Please enter color")
+                return
+            search["color"] = text
+            state["step"] = "search_clarity"
+            await message.reply("Enter Clarity(ies) (e.g., vs, vvs) or 'any':")
+            
+        elif current_step == "search_clarity":
+            if not text:
+                await message.reply("Please enter clarity")
+                return
+            search["clarity"] = text
+            
+            user = get_logged_user(uid)
+            if not user:
+                await message.reply("❌ Session expired. Please login again.")
                 user_state.pop(uid, None)
                 return
-        
-        # Shape filter
-        if search["shape"] != "any":
-            shapes = [s.strip() for s in search["shape"].split(",")]
-            filtered_df = filtered_df[
-                filtered_df["Shape"].str.lower().isin([s.lower() for s in shapes])
-            ]
-        
-        # Color filter
-        if search["color"] != "any":
-            colors = [c.strip().upper() for c in search["color"].split(",")]
-            filtered_df = filtered_df[
-                filtered_df["Color"].str.upper().isin(colors)
-            ]
-        
-        # Clarity filter
-        if search["clarity"] != "any":
-            clarities = [c.strip().upper() for c in search["clarity"].split(",")]
-            filtered_df = filtered_df[
-                filtered_df["Clarity"].str.upper().isin(clarities)
-            ]
-        
-        if filtered_df.empty:
-            await message.reply("❌ No diamonds match your search criteria.")
+            
+            df = load_stock()
+            if df.empty:
+                await message.reply("❌ No diamonds available in stock.")
+                user_state.pop(uid, None)
+                return
+            
+            filtered_df = df.copy()
+            
+            # Carat filter
+            if search["carat"] != "any":
+                try:
+                    if "-" in search["carat"]:
+                        min_carat, max_carat = map(float, search["carat"].split("-"))
+                        filtered_df = filtered_df[
+                            (filtered_df["Weight"] >= min_carat) & 
+                            (filtered_df["Weight"] <= max_carat)
+                        ]
+                    else:
+                        target_carat = float(search["carat"])
+                        filtered_df = filtered_df[
+                            (filtered_df["Weight"] >= target_carat * 0.9) & 
+                            (filtered_df["Weight"] <= target_carat * 1.1)
+                        ]
+                except:
+                    await message.reply("❌ Invalid carat format. Use like '1.5' or '1-2'")
+                    user_state.pop(uid, None)
+                    return
+            
+            # Shape filter
+            if search["shape"] != "any":
+                shapes = [s.strip() for s in search["shape"].split(",")]
+                filtered_df = filtered_df[
+                    filtered_df["Shape"].str.lower().isin([s.lower() for s in shapes])
+                ]
+            
+            # Color filter
+            if search["color"] != "any":
+                colors = [c.strip().upper() for c in search["color"].split(",")]
+                filtered_df = filtered_df[
+                    filtered_df["Color"].str.upper().isin(colors)
+                ]
+            
+            # Clarity filter
+            if search["clarity"] != "any":
+                clarities = [c.strip().upper() for c in search["clarity"].split(",")]
+                filtered_df = filtered_df[
+                    filtered_df["Clarity"].str.upper().isin(clarities)
+                ]
+            
+            if filtered_df.empty:
+                await message.reply("❌ No diamonds match your search criteria.")
+                user_state.pop(uid, None)
+                return
+            
+            total_diamonds = len(filtered_df)
+            total_carats = filtered_df["Weight"].sum() if "Weight" in filtered_df.columns else 0
+            
+            if total_diamonds > 10:
+                excel_path = "/tmp/search_results.xlsx"
+                filtered_df.to_excel(excel_path, index=False)
+                
+                await message.reply_document(
+                    types.FSInputFile(excel_path),
+                    caption=(
+                        f"💎 Found {total_diamonds} diamonds\n"
+                        f"📊 Total weight: {total_carats:.2f} ct\n"
+                        f"🎯 Your filters:\n"
+                        f"• Carat: {search['carat']}\n"
+                        f"• Shape: {search['shape']}\n"
+                        f"• Color: {search['color']}\n"
+                        f"• Clarity: {search['clarity']}"
+                    )
+                )
+                
+                if os.path.exists(excel_path):
+                    os.remove(excel_path)
+            else:
+                for _, row in filtered_df.iterrows():
+                    msg = (
+                        f"💎 **{row['Stock #']}**\n"
+                        f"📐 Shape: {row.get('Shape', 'N/A')}\n"
+                        f"⚖️ Weight: {row.get('Weight', 'N/A')} ct\n"
+                        f"🎨 Color: {row.get('Color', 'N/A')}\n"
+                        f"✨ Clarity: {row.get('Clarity', 'N/A')}\n"
+                        f"💰 Price: ${row.get('Price Per Carat', 'N/A')}/ct\n"
+                        f"🔒 Status: {row.get('LOCKED', 'NO')}\n"
+                        f"🏛 Lab: {row.get('Lab', 'N/A')}"
+                    )
+                    await message.reply(msg)
+            
+            log_activity(user, "SEARCH", {
+                "filters": search,
+                "results": total_diamonds
+            })
+            
             user_state.pop(uid, None)
-            return
         
-        total_diamonds = len(filtered_df)
-        total_carats = filtered_df["Weight"].sum()
-        
-        if total_diamonds > 10:
-            excel_path = "/tmp/search_results.xlsx"
-            filtered_df.to_excel(excel_path, index=False)
-            
-            await message.reply_document(
-                types.FSInputFile(excel_path),
-                caption=(
-                    f"💎 Found {total_diamonds} diamonds\n"
-                    f"📊 Total weight: {total_carats:.2f} ct\n"
-                    f"🎯 Your filters:\n"
-                    f"• Carat: {search['carat']}\n"
-                    f"• Shape: {search['shape']}\n"
-                    f"• Color: {search['color']}\n"
-                    f"• Clarity: {search['clarity']}"
-                )
-            )
-            
-            if os.path.exists(excel_path):
-                os.remove(excel_path)
-        else:
-            for _, row in filtered_df.iterrows():
-                msg = (
-                    f"💎 **{row['Stock #']}**\n"
-                    f"📐 Shape: {row.get('Shape', 'N/A')}\n"
-                    f"⚖️ Weight: {row.get('Weight', 'N/A')} ct\n"
-                    f"🎨 Color: {row.get('Color', 'N/A')}\n"
-                    f"✨ Clarity: {row.get('Clarity', 'N/A')}\n"
-                    f"💰 Price: ${row.get('Price Per Carat', 'N/A')}/ct\n"
-                    f"🔒 Status: {row.get('LOCKED', 'NO')}\n"
-                    f"🏛 Lab: {row.get('Lab', 'N/A')}"
-                )
-                await message.reply(msg)
-        
-        log_activity(user, "SEARCH", {
-            "filters": search,
-            "results": total_diamonds
-        })
-        
+    except Exception as e:
+        logger.error(f"❌ Error in handle_search_flow: {e}", exc_info=True)
+        await message.reply(f"❌ Search error: {type(e).__name__}. Please start over.")
         user_state.pop(uid, None)
 
 # -------- DEAL FLOW HANDLER --------
 async def handle_deal_flow(message: types.Message, state: Dict):
     """Handle deal request flow"""
-    uid = message.from_user.id
-    text = message.text.strip()
-    current_step = state["step"]
-    
-    if current_step == "deal_stone":
-        state["stone_id"] = text
-        state["step"] = "deal_price"
-        await message.reply("💰 Enter your offer price ($ per carat):")
+    try:
+        uid = message.from_user.id
+        text = message.text.strip() if message.text else ""
+        current_step = state["step"]
         
-    elif current_step == "deal_price":
-        try:
-            offer_price = float(text)
-            if offer_price <= 0:
-                await message.reply("❌ Price must be greater than zero.")
+        if current_step == "deal_stone":
+            if not text:
+                await message.reply("Please enter Stone ID")
                 return
-        except:
-            await message.reply("❌ Please enter a valid number.")
-            return
-        
-        user = get_logged_user(uid)
-        if not user:
-            await message.reply("❌ Session expired. Please login again.")
-            user_state.pop(uid, None)
-            return
-        
-        stone_id = state["stone_id"]
-        
-        df = load_stock()
-        stone_row = df[df["Stock #"] == stone_id]
-        
-        if stone_row.empty:
-            await message.reply("❌ Stone not found.")
-            user_state.pop(uid, None)
-            return
-        
-        if stone_row.iloc[0].get("LOCKED") == "YES":
-            await message.reply("🔒 This stone is already locked in another deal.")
-            user_state.pop(uid, None)
-            return
-        
-        deal_id = f"DEAL-{uuid.uuid4().hex[:10].upper()}"
-        stone_data = stone_row.iloc[0]
-        
-        deal = {
-            "deal_id": deal_id,
-            "stone_id": stone_id,
-            "supplier_username": stone_data.get("SUPPLIER", "").replace("supplier_", ""),
-            "client_username": user["USERNAME"],
-            "actual_stock_price": float(stone_data.get("Price Per Carat", 0)),
-            "client_offer_price": offer_price,
-            "supplier_action": "PENDING",
-            "admin_action": "PENDING",
-            "final_status": "OPEN",
-            "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
-        }
-        
-        if not atomic_lock_stone(stone_id):
-            await message.reply("🔒 Stone is no longer available.")
-            user_state.pop(uid, None)
-            return
-        
-        if s3:
-            deal_key = f"{DEALS_FOLDER}{deal_id}.json"
-            s3.put_object(
-                Bucket=CONFIG["AWS_BUCKET"],
-                Key=deal_key,
-                Body=json.dumps(deal, indent=2),
-                ContentType="application/json"
+            state["stone_id"] = text
+            state["step"] = "deal_price"
+            await message.reply("💰 Enter your offer price ($ per carat):")
+            
+        elif current_step == "deal_price":
+            if not text:
+                await message.reply("Please enter offer price")
+                return
+                
+            try:
+                offer_price = float(text)
+                if offer_price <= 0:
+                    await message.reply("❌ Price must be greater than zero.")
+                    return
+            except:
+                await message.reply("❌ Please enter a valid number.")
+                return
+            
+            user = get_logged_user(uid)
+            if not user:
+                await message.reply("❌ Session expired. Please login again.")
+                user_state.pop(uid, None)
+                return
+            
+            stone_id = state["stone_id"]
+            
+            df = load_stock()
+            if df.empty:
+                await message.reply("❌ No stock available.")
+                user_state.pop(uid, None)
+                return
+                
+            stone_row = df[df["Stock #"] == stone_id]
+            
+            if stone_row.empty:
+                await message.reply("❌ Stone not found.")
+                user_state.pop(uid, None)
+                return
+            
+            if stone_row.iloc[0].get("LOCKED") == "YES":
+                await message.reply("🔒 This stone is already locked in another deal.")
+                user_state.pop(uid, None)
+                return
+            
+            deal_id = f"DEAL-{uuid.uuid4().hex[:10].upper()}"
+            stone_data = stone_row.iloc[0]
+            
+            deal = {
+                "deal_id": deal_id,
+                "stone_id": stone_id,
+                "supplier_username": stone_data.get("SUPPLIER", "").replace("supplier_", ""),
+                "client_username": user["USERNAME"],
+                "actual_stock_price": float(stone_data.get("Price Per Carat", 0)),
+                "client_offer_price": offer_price,
+                "supplier_action": "PENDING",
+                "admin_action": "PENDING",
+                "final_status": "OPEN",
+                "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            if not atomic_lock_stone(stone_id):
+                await message.reply("🔒 Stone is no longer available.")
+                user_state.pop(uid, None)
+                return
+            
+            if s3:
+                deal_key = f"{DEALS_FOLDER}{deal_id}.json"
+                s3.put_object(
+                    Bucket=CONFIG["AWS_BUCKET"],
+                    Key=deal_key,
+                    Body=json.dumps(deal, indent=2),
+                    ContentType="application/json"
+                )
+            
+            log_deal_history(deal)
+            
+            save_notification(
+                deal["supplier_username"],
+                "supplier",
+                f"📩 New deal offer for Stone {stone_id}\n"
+                f"💰 Offer: ${offer_price}/ct"
             )
+            
+            log_activity(user, "REQUEST_DEAL", {
+                "stone_id": stone_id,
+                "offer_price": offer_price,
+                "deal_id": deal_id
+            })
+            
+            await message.reply(
+                f"✅ Deal request sent successfully!\n\n"
+                f"📋 **Deal ID:** {deal_id}\n"
+                f"💎 **Stone ID:** {stone_id}\n"
+                f"💰 **Your Offer:** ${offer_price}/ct\n"
+                f"⏳ **Status:** Waiting for supplier response\n\n"
+                f"Use '🤝 View Deals' to check status."
+            )
+            
+            user_state.pop(uid, None)
         
-        log_deal_history(deal)
-        
-        save_notification(
-            deal["supplier_username"],
-            "supplier",
-            f"📩 New deal offer for Stone {stone_id}\n"
-            f"💰 Offer: ${offer_price}/ct"
-        )
-        
-        log_activity(user, "REQUEST_DEAL", {
-            "stone_id": stone_id,
-            "offer_price": offer_price,
-            "deal_id": deal_id
-        })
-        
-        await message.reply(
-            f"✅ Deal request sent successfully!\n\n"
-            f"📋 **Deal ID:** {deal_id}\n"
-            f"💎 **Stone ID:** {stone_id}\n"
-            f"💰 **Your Offer:** ${offer_price}/ct\n"
-            f"⏳ **Status:** Waiting for supplier response\n\n"
-            f"Use '🤝 View Deals' to check status."
-        )
-        
+    except Exception as e:
+        logger.error(f"❌ Error in handle_deal_flow: {e}", exc_info=True)
+        await message.reply(f"❌ Deal error: {type(e).__name__}. Please try again.")
         user_state.pop(uid, None)
 
 # -------- LOGGED IN BUTTON HANDLERS --------
 async def handle_logged_in_buttons(message: types.Message, user: Dict):
     """Handle button presses for logged in users"""
     try:
+        if not user:
+            await message.reply("❌ User session expired. Please login again.")
+            return
+            
         text = message.text
         role = user.get("ROLE", "").lower()
         
         logger.info(f"Button pressed: {text} by {user['USERNAME']} (role: {role})")
+        
+        # Defensive check for empty buttons
+        if not text:
+            await message.reply("Please use the menu buttons.")
+            return
         
         # Admin buttons
         if role == "admin":
@@ -2098,7 +2283,11 @@ async def handle_logged_in_buttons(message: types.Message, user: Dict):
                 
     except Exception as e:
         logger.error(f"❌ Error in handle_logged_in_buttons: {e}", exc_info=True)
-        await message.reply("❌ An error occurred. Please try again.")
+        await message.reply(
+            f"❌ Button handler error.\n\n"
+            f"**Error:** {type(e).__name__}\n"
+            f"Please try again or use /fix to reset."
+        )
 
 # -------- ADMIN HANDLERS --------
 async def view_all_stock(message: types.Message, user: Dict):
@@ -2111,8 +2300,8 @@ async def view_all_stock(message: types.Message, user: Dict):
             return
         
         total_diamonds = len(df)
-        total_carats = df["Weight"].sum()
-        total_value = (df["Weight"] * df["Price Per Carat"]).sum()
+        total_carats = df["Weight"].sum() if "Weight" in df.columns else 0
+        total_value = (df["Weight"] * df["Price Per Carat"]).sum() if "Weight" in df.columns and "Price Per Carat" in df.columns else 0
         
         summary = (
             f"📊 **Stock Summary**\n\n"
@@ -3140,7 +3329,7 @@ async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.D
                 "supplier_action": "PENDING",
                 "admin_action": "PENDING",
                 "final_status": "OPEN",
-                "created_at": datetime.now(IST).strftime("%Y-%m-d %H:%M:%S")
+                "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
             }
             
             if not atomic_lock_stone(stone_id):
@@ -3401,6 +3590,7 @@ if __name__ == "__main__":
     logger.info(f"   • Health Check: {CONFIG['RENDER_EXTERNAL_URL']}/health")
     logger.info(f"   • Keep-Alive: {CONFIG['RENDER_EXTERNAL_URL']}/keep-alive")
     logger.info(f"   • Status: {CONFIG['RENDER_EXTERNAL_URL']}/status")
+    logger.info(f"   • Debug: {CONFIG['RENDER_EXTERNAL_URL']}/debug")
     logger.info("="*80 + "\n")
     
     uvicorn.run(
