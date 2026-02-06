@@ -59,6 +59,7 @@ def load_env_config():
         "RATE_LIMIT": int(os.getenv("RATE_LIMIT", "5")),
         "RATE_LIMIT_WINDOW": int(os.getenv("RATE_LIMIT_WINDOW", "10")),
         "WEBHOOK_URL": os.getenv("WEBHOOK_URL", ""),
+        "TEST_CHAT_ID": os.getenv("TEST_CHAT_ID", ""),
     }
     
     # Validate required configurations
@@ -604,7 +605,7 @@ class DiamondExcelValidator:
             if 'Price Per Carat' in df.columns:
                 try:
                     df['Price Per Carat'] = pd.to_numeric(df['Price Per Carat'], errors='coerce')
-                    invalid_prices = df['Price Per Carat'].isna() | (df['Price Per Carat'] <= 0)
+                    invalid_prices = df['Price Per Carat'].isna() | (df['Price Per Carat"] <= 0)
                     if invalid_prices.any():
                         invalid_count = invalid_prices.sum()
                         errors.append(f'Price Per Carat: {invalid_count} rows have invalid values (must be > 0)')
@@ -1320,45 +1321,6 @@ async def api_download_template():
             content={"success": False, "message": f"Error generating template: {str(e)}"}
         )
 
-@app.get("/api/validate-excel")
-async def api_validate_excel_url(url: str):
-    """Validate Excel file from URL"""
-    try:
-        # Download file from URL
-        import requests
-        response = requests.get(url)
-        
-        if response.status_code != 200:
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": "Failed to download file from URL"}
-            )
-        
-        # Read Excel
-        df = pd.read_excel(BytesIO(response.content))
-        
-        # Validate
-        validator = DiamondExcelValidator()
-        success, cleaned_df, errors, warnings = validator.validate_and_parse(df, "test_supplier")
-        
-        return JSONResponse(
-            status_code=200 if success else 400,
-            content={
-                "success": success,
-                "message": "Validation completed" if success else "Validation failed",
-                "errors": errors,
-                "warnings": warnings,
-                "sample_count": len(df) if success else 0
-            }
-        )
-        
-    except Exception as e:
-        logger.error(f"❌ Validation error: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": f"Validation error: {str(e)}"}
-        )
-
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     """Handle Telegram webhook updates"""
@@ -1396,6 +1358,23 @@ async def delete_webhook_endpoint():
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         return {"status": "success", "message": "Webhook deleted"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+@app.get("/test")
+async def test_bot():
+    """Test if bot can send messages"""
+    try:
+        # Send a test message to yourself
+        test_chat_id = CONFIG.get("TEST_CHAT_ID")
+        if test_chat_id and test_chat_id.isdigit():
+            await bot.send_message(
+                chat_id=int(test_chat_id),
+                text="🤖 Bot is working! Test message."
+            )
+            return {"status": "success", "message": "Test message sent"}
+        else:
+            return {"status": "warning", "message": "TEST_CHAT_ID not set or is invalid"}
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
