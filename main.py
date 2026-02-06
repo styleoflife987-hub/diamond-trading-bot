@@ -1544,6 +1544,68 @@ async def test_bot():
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
+# ============================================================================
+# CRITICAL FIX: DOCUMENT HANDLER MUST COME BEFORE GENERAL MESSAGE HANDLER
+# ============================================================================
+
+# -------- DOCUMENT HANDLER (MUST COME FIRST) --------
+@dp.message(F.document)
+async def handle_document(message: types.Message):
+    """Handle document uploads (Excel files) - THIS MUST BE FIRST"""
+    try:
+        uid = message.from_user.id
+        user = get_logged_user(uid)
+        
+        if not user:
+            await message.reply("🔒 Please login first.")
+            return
+        
+        logger.info(f"📎 Document received from {uid}: {message.document.file_name}")
+        
+        if message.document.file_size > 10 * 1024 * 1024:
+            await message.reply("❌ File too large. Max size is 10MB.")
+            return
+        
+        file_name = message.document.file_name.lower()
+        if not file_name.endswith(('.xlsx', '.xls')):
+            await message.reply("❌ Only Excel files (.xlsx, .xls) are allowed.")
+            return
+        
+        # Send processing message
+        processing_msg = await message.reply("🔄 Processing your Excel file...")
+        
+        # Download file
+        file = await bot.get_file(message.document.file_id)
+        temp_path = f"/tmp/{uid}_{int(time.time())}_{file_name}"
+        await bot.download_file(file.file_path, temp_path)
+        
+        try:
+            df = pd.read_excel(temp_path)
+        except Exception as e:
+            await processing_msg.edit_text(f"❌ Error reading Excel file: {str(e)}")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            return
+        
+        user_role = user["ROLE"]
+        
+        # Handle based on role
+        if user_role == "supplier":
+            await handle_supplier_stock_upload(message, user, df, temp_path, processing_msg)
+        else:
+            await processing_msg.edit_text("❌ Only suppliers can upload stock.")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in handle_document: {e}", exc_info=True)
+        await message.reply(f"❌ Error processing file: {str(e)}")
+        
+    finally:
+        if 'temp_path' in locals() and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+
 # -------- COMMAND HANDLERS --------
 @dp.message(Command("start"))
 async def start(message: types.Message):
@@ -1708,6 +1770,38 @@ async def fix_state_command(message: types.Message):
     except Exception as e:
         logger.error(f"Fix command error: {e}")
         await message.reply("❌ Could not fix state.")
+
+@dp.message(Command("upload"))
+async def upload_command(message: types.Message):
+    """Force enable upload mode for suppliers"""
+    try:
+        uid = message.from_user.id
+        user = get_logged_user(uid)
+        
+        if not user:
+            await message.reply("🔒 Please login first.")
+            return
+        
+        if user.get("ROLE") != "supplier":
+            await message.reply("❌ Only suppliers can upload stock.")
+            return
+        
+        # Clear any existing state
+        user_state[uid] = {"upload_mode": True}
+        
+        await message.reply(
+            "📤 **Upload Mode Enabled**\n\n"
+            "You can now send your Excel file directly.\n\n"
+            "**Requirements:**\n"
+            "• Must be .xlsx or .xls format\n"
+            "• Max 10MB size\n"
+            "• Required columns: Stock #, Shape, Weight, Color, Clarity, etc.\n\n"
+            "📎 **Send your Excel file now.**"
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Upload command error: {e}")
+        await message.reply("❌ Error enabling upload mode.")
 
 @dp.message(Command("mystate"))
 async def show_my_state(message: types.Message):
@@ -3141,73 +3235,6 @@ async def cancel_delete(callback: types.CallbackQuery):
         reply_markup=None
     )
     await callback.answer("Cancelled")
-
-# -------- DOCUMENT HANDLER (FIXED) --------
-@dp.message(F.document)
-async def handle_document(message: types.Message):
-    """Handle document uploads (Excel files)"""
-    try:
-        uid = message.from_user.id
-        user = get_logged_user(uid)
-        
-        if not user:
-            await message.reply("🔒 Please login first.")
-            return
-        
-        if message.document.file_size > 10 * 1024 * 1024:
-            await message.reply("❌ File too large. Max size is 10MB.")
-            return
-        
-        file_name = message.document.file_name.lower()
-        if not file_name.endswith(('.xlsx', '.xls')):
-            await message.reply("❌ Only Excel files (.xlsx, .xls) are allowed.")
-            return
-        
-        # Send processing message
-        processing_msg = await message.reply("🔄 Processing your Excel file...")
-        
-        # Download file
-        file = await bot.get_file(message.document.file_id)
-        temp_path = f"/tmp/{uid}_{int(time.time())}_{file_name}"
-        await bot.download_file(file.file_path, temp_path)
-        
-        try:
-            df = pd.read_excel(temp_path)
-        except Exception as e:
-            await processing_msg.edit_text(f"❌ Error reading Excel file: {str(e)}")
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            return
-        
-        state = user_state.get(uid, {})
-        user_role = user["ROLE"]
-        
-        # Check if it's a supplier uploading stock
-        if user_role == "supplier":
-            await handle_supplier_stock_upload(message, user, df, temp_path, processing_msg)
-            
-        elif user_role == "client" and state.get("step") == "bulk_deal_excel":
-            await handle_bulk_deal_requests(message, user, df, temp_path, processing_msg)
-            
-        elif user_role == "admin":
-            await handle_admin_deal_approvals(message, user, df, temp_path, processing_msg)
-            
-        elif user_role == "supplier" and "Deal ID" in df.columns:
-            await handle_supplier_deal_responses(message, user, df, temp_path, processing_msg)
-            
-        else:
-            await processing_msg.edit_text("❌ Invalid file format or action.")
-            
-    except Exception as e:
-        logger.error(f"❌ Error in handle_document: {e}", exc_info=True)
-        await message.reply(f"❌ Error processing file: {str(e)}")
-        
-    finally:
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except:
-                pass
 
 # -------- SUPPLIER STOCK UPLOAD HANDLER --------
 async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str, processing_msg: types.Message):
