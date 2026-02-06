@@ -3151,10 +3151,10 @@ async def cancel_delete(callback: types.CallbackQuery):
     )
     await callback.answer("Cancelled")
 
-# -------- DOCUMENT HANDLER --------
+# -------- DOCUMENT HANDLER (FIXED) --------
 @dp.message(F.document)
 async def handle_document(message: types.Message):
-    """Handle document uploads (Excel files)"""
+    """Handle document uploads (Excel files) - FIXED VERSION"""
     try:
         uid = message.from_user.id
         user = get_logged_user(uid)
@@ -3172,28 +3172,40 @@ async def handle_document(message: types.Message):
             await message.reply("❌ Only Excel files (.xlsx, .xls) are allowed.")
             return
         
+        # IMPORTANT: Send "Processing..." message immediately
+        processing_msg = await message.reply("🔄 Processing your Excel file...")
+        
+        # Download file
         file = await bot.get_file(message.document.file_id)
         temp_path = f"/tmp/{uid}_{int(time.time())}_{file_name}"
         await bot.download_file(file.file_path, temp_path)
         
-        df = pd.read_excel(temp_path)
+        try:
+            df = pd.read_excel(temp_path)
+        except Exception as e:
+            await processing_msg.edit_text(f"❌ Error reading Excel file: {str(e)}")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            return
         
         state = user_state.get(uid, {})
+        user_role = user["ROLE"]
         
-        if user["ROLE"] == "supplier" and not state.get("step") == "bulk_deal_excel":
-            await handle_supplier_stock_upload(message, user, df, temp_path)
+        # Check if it's a supplier uploading stock (MOST COMMON CASE)
+        if user_role == "supplier" and not state.get("step") == "bulk_deal_excel":
+            await handle_supplier_stock_upload(message, user, df, temp_path, processing_msg)
             
-        elif user["ROLE"] == "client" and state.get("step") == "bulk_deal_excel":
-            await handle_bulk_deal_requests(message, user, df, temp_path)
+        elif user_role == "client" and state.get("step") == "bulk_deal_excel":
+            await handle_bulk_deal_requests(message, user, df, temp_path, processing_msg)
             
-        elif user["ROLE"] == "admin":
-            await handle_admin_deal_approvals(message, user, df, temp_path)
+        elif user_role == "admin":
+            await handle_admin_deal_approvals(message, user, df, temp_path, processing_msg)
             
-        elif user["ROLE"] == "supplier" and "Deal ID" in df.columns:
-            await handle_supplier_deal_responses(message, user, df, temp_path)
+        elif user_role == "supplier" and "Deal ID" in df.columns:
+            await handle_supplier_deal_responses(message, user, df, temp_path, processing_msg)
             
         else:
-            await message.reply("❌ Invalid file format or action.")
+            await processing_msg.edit_text("❌ Invalid file format or action. Please use the correct template.")
             
     except Exception as e:
         logger.error(f"❌ Error in handle_document: {e}", exc_info=True)
@@ -3203,8 +3215,9 @@ async def handle_document(message: types.Message):
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
-async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str):
-    """Handle supplier stock upload"""
+# -------- UPDATED SUPPLIER STOCK UPLOAD HANDLER --------
+async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str, processing_msg: types.Message):
+    """Handle supplier stock upload - IMPROVED WITH DETAILED RESPONSE"""
     try:
         # Validate using the new validator
         supplier_name = f"supplier_{user['USERNAME'].lower()}"
@@ -3222,7 +3235,9 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
                 for warning in warnings[:3]:
                     error_msg += f"⚠️ {warning}\n"
             
-            await message.reply(error_msg)
+            error_msg += "\n**Please fix the errors and try again.**"
+            
+            await processing_msg.edit_text(error_msg)
             return
         
         # Save to S3
@@ -3241,6 +3256,7 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
         total_carats = cleaned_df["Weight"].sum() if "Weight" in cleaned_df.columns else 0
         total_value = (cleaned_df["Weight"] * cleaned_df["Price Per Carat"]).sum() if "Weight" in cleaned_df.columns and "Price Per Carat" in cleaned_df.columns else 0
         
+        # Send detailed success message
         success_msg = (
             f"✅ **Stock Upload Successful!**\n\n"
             f"📊 **Statistics:**\n"
@@ -3251,20 +3267,37 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
             f"• Min: ${cleaned_df['Price Per Carat'].min():,.0f}/ct\n"
             f"• Avg: ${cleaned_df['Price Per Carat'].mean():,.0f}/ct\n"
             f"• Max: ${cleaned_df['Price Per Carat'].max():,.0f}/ct\n\n"
-            f"🔄 Combined stock has been updated."
         )
         
+        # Add shape distribution
+        if "Shape" in cleaned_df.columns and not cleaned_df["Shape"].empty:
+            shape_counts = cleaned_df["Shape"].value_counts().head(5)
+            if not shape_counts.empty:
+                success_msg += f"**Shape Distribution:**\n"
+                for shape, count in shape_counts.items():
+                    success_msg += f"• {shape}: {count}\n"
+        
+        success_msg += f"\n🔄 Combined stock has been updated."
+        
         if warnings:
-            success_msg += "\n\n**Warnings:**\n"
+            success_msg += "\n\n**Warnings (not critical):**\n"
             for warning in warnings[:3]:
                 success_msg += f"⚠️ {warning}\n"
         
-        await message.reply(success_msg)
+        # Send the success message
+        await processing_msg.edit_text(success_msg)
+        
+        # Also send as a new message for better formatting
+        await message.reply(
+            f"📦 **Your stock has been saved!**\n"
+            f"View it using '📦 My Stock' button.\n"
+            f"Use '📊 My Analytics' for price insights."
+        )
         
         log_activity(user, "UPLOAD_STOCK", {
             "stones": total_stones,
-            "carats": total_carats,
-            "value": total_value,
+            "carats": float(total_carats),
+            "value": float(total_value),
             "warnings": warnings
         })
         
@@ -3272,20 +3305,21 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
             os.remove(temp_supplier_path)
             
     except Exception as e:
-        logger.error(f"❌ Error in handle_supplier_stock_upload: {e}")
-        await message.reply("❌ Failed to upload stock.")
+        logger.error(f"❌ Error in handle_supplier_stock_upload: {e}", exc_info=True)
+        await processing_msg.edit_text(f"❌ Failed to upload stock: {str(e)}")
+        await message.reply("Please try again or use /fix if the problem persists.")
 
-async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str):
+async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str, processing_msg: types.Message):
     """Handle client bulk deal requests"""
     try:
         if "Stock #" not in df.columns or "Offer Price ($/ct)" not in df.columns:
-            await message.reply("❌ Invalid format. Need 'Stock #' and 'Offer Price ($/ct)' columns.")
+            await processing_msg.edit_text("❌ Invalid format. Need 'Stock #' and 'Offer Price ($/ct)' columns.")
             return
         
         df = df.dropna(subset=["Stock #", "Offer Price ($/ct)"])
         
         if df.empty:
-            await message.reply("❌ No valid deal requests found.")
+            await processing_msg.edit_text("❌ No valid deal requests found.")
             return
         
         stock_df = load_stock()
@@ -3366,7 +3400,7 @@ async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.D
             if len(failed_deals) > 10:
                 result_msg += f"... and {len(failed_deals) - 10} more\n"
         
-        await message.reply(result_msg)
+        await processing_msg.edit_text(result_msg)
         
         user_state.pop(message.from_user.id, None)
         
@@ -3377,15 +3411,15 @@ async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.D
         
     except Exception as e:
         logger.error(f"❌ Error in handle_bulk_deal_requests: {e}")
-        await message.reply("❌ Failed to process bulk deal requests.")
+        await processing_msg.edit_text(f"❌ Failed to process bulk deal requests: {str(e)}")
 
-async def handle_admin_deal_approvals(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str):
+async def handle_admin_deal_approvals(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str, processing_msg: types.Message):
     """Handle admin deal approval Excel"""
     try:
         required_cols = ["Deal ID", "Admin Action (YES/NO)"]
         for col in required_cols:
             if col not in df.columns:
-                await message.reply(f"❌ Missing column: {col}")
+                await processing_msg.edit_text(f"❌ Missing column: {col}")
                 return
         
         processed = 0
@@ -3454,18 +3488,18 @@ async def handle_admin_deal_approvals(message: types.Message, user: Dict, df: pd
                 logger.error(f"Failed to process deal {deal_id}: {e}")
                 continue
         
-        await message.reply(f"✅ Processed {processed} deal approvals.")
+        await processing_msg.edit_text(f"✅ Processed {processed} deal approvals.")
         log_activity(user, "PROCESS_DEAL_APPROVALS", {"count": processed})
         
     except Exception as e:
         logger.error(f"❌ Error in handle_admin_deal_approvals: {e}")
-        await message.reply("❌ Failed to process deal approvals.")
+        await processing_msg.edit_text(f"❌ Failed to process deal approvals: {str(e)}")
 
-async def handle_supplier_deal_responses(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str):
+async def handle_supplier_deal_responses(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str, processing_msg: types.Message):
     """Handle supplier deal response Excel"""
     try:
         if "Deal ID" not in df.columns or "Supplier Action (ACCEPT/REJECT)" not in df.columns:
-            await message.reply("❌ Invalid format. Need 'Deal ID' and 'Supplier Action (ACCEPT/REJECT)' columns.")
+            await processing_msg.edit_text("❌ Invalid format. Need 'Deal ID' and 'Supplier Action (ACCEPT/REJECT)' columns.")
             return
         
         processed = 0
@@ -3539,12 +3573,12 @@ async def handle_supplier_deal_responses(message: types.Message, user: Dict, df:
                 logger.error(f"Failed to process deal {deal_id}: {e}")
                 continue
         
-        await message.reply(f"✅ Processed {processed} deal responses.")
+        await processing_msg.edit_text(f"✅ Processed {processed} deal responses.")
         log_activity(user, "PROCESS_DEAL_RESPONSES", {"count": processed})
         
     except Exception as e:
         logger.error(f"❌ Error in handle_supplier_deal_responses: {e}")
-        await message.reply("❌ Failed to process deal responses.")
+        await processing_msg.edit_text(f"❌ Failed to process deal responses: {str(e)}")
 
 # -------- MAIN ENTRY POINT --------
 if __name__ == "__main__":
