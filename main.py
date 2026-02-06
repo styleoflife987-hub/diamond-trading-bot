@@ -54,7 +54,7 @@ def load_env_config():
         "AWS_SECRET_ACCESS_KEY": os.getenv("AWS_SECRET_ACCESS_KEY"),
         "AWS_REGION": os.getenv("AWS_REGION", "ap-south-1"),
         "AWS_BUCKET": os.getenv("AWS_BUCKET", "diamond-bucket-styleoflifes"),
-        "PORT": int(os.getenv("PORT", "8000")),  # Render uses 8000
+        "PORT": int(os.getenv("PORT", "8000")),
         "PYTHON_VERSION": os.getenv("PYTHON_VERSION", "3.11.0"),
         "SESSION_TIMEOUT": int(os.getenv("SESSION_TIMEOUT", "3600")),
         "RATE_LIMIT": int(os.getenv("RATE_LIMIT", "5")),
@@ -3547,52 +3547,55 @@ async def handle_supplier_deal_responses(message: types.Message, user: Dict, df:
         await message.reply("❌ Failed to process deal responses.")
 
 # -------- MAIN ENTRY POINT --------
-# IMPORTANT: Render runs the app directly, not via if __name__ == "__main__"
-
-logger.info(f"🚀 Starting Diamond Trading Bot v1.0")
-logger.info(f"📊 Python: {CONFIG['PYTHON_VERSION']}")
-logger.info(f"🌐 Port: {CONFIG['PORT']}")
-logger.info(f"🔗 Webhook URL: {CONFIG['WEBHOOK_URL']}")
-logger.info(f"🤖 Bot Token: {'Set' if CONFIG['BOT_TOKEN'] else 'Not Set'}")
-logger.info(f"📦 S3 Bucket: {CONFIG['AWS_BUCKET']}")
-
-# Check if all required environment variables are set
-required_vars = ["BOT_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_BUCKET"]
-missing_vars = [var for var in required_vars if not os.getenv(var)]
-
-if missing_vars:
-    logger.error(f"❌ Missing required environment variables: {missing_vars}")
-    logger.error("Please set these in your Render environment variables.")
-else:
-    logger.info("✅ All required environment variables are set")
-
-# Preload data for faster startup
-preload_data()
-
-# Register cleanup function
-atexit.register(lambda: logger.info("👋 Bot shutting down"))
-
-# IMPORTANT: Setup instructions for 24/7 operation
-logger.info("\n" + "="*80)
-logger.info("🔄 FOR 24/7 OPERATION:")
-logger.info("="*80)
-logger.info("✅ INTERNAL: Keep-alive pinger started (pings every 5 minutes)")
-logger.info("📋 EXTERNAL: Set up uptime monitoring:")
-logger.info("   1. Go to https://uptimerobot.com/")
-logger.info("   2. Create free account")
-logger.info("   3. Add new monitor:")
-logger.info("      - Monitor Type: HTTP(s)")
-logger.info("      - Friendly Name: Diamond Trading Bot")
-logger.info("      - URL: https://telegram-bot-6iil.onrender.com/keep-alive")
-logger.info("      - Monitoring Interval: 5 minutes")
-logger.info("="*80)
-logger.info("📞 Monitoring URLs:")
-logger.info(f"   • Health Check: {CONFIG['RENDER_EXTERNAL_URL']}/health")
-logger.info(f"   • Keep-Alive: {CONFIG['RENDER_EXTERNAL_URL']}/keep-alive")
-logger.info(f"   • Status: {CONFIG['RENDER_EXTERNAL_URL']}/status")
-logger.info(f"   • Debug: {CONFIG['RENDER_EXTERNAL_URL']}/debug")
-logger.info("="*80 + "\n")
-
-# Export the app for Render
-# Render will look for a variable called 'app'
-app = app
+if __name__ == "__main__":
+    logger.info(f"🚀 Starting Diamond Trading Bot v1.0")
+    logger.info(f"📊 Python: {CONFIG['PYTHON_VERSION']}")
+    logger.info(f"🌐 Port: {CONFIG['PORT']}")
+    logger.info(f"🔗 Webhook URL: {CONFIG['WEBHOOK_URL']}")
+    logger.info(f"🤖 Bot Token: {'Set' if CONFIG['BOT_TOKEN'] else 'Not Set'}")
+    logger.info(f"📦 S3 Bucket: {CONFIG['AWS_BUCKET']}")
+    
+    # Check if all required environment variables are set
+    required_vars = ["BOT_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_BUCKET"]
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    
+    if missing_vars:
+        logger.error(f"❌ Missing required environment variables: {missing_vars}")
+        logger.error("Please set these in your Render environment variables.")
+    else:
+        logger.info("✅ All required environment variables are set")
+    
+    # Preload data for faster startup
+    preload_data()
+    
+    # Register cleanup function
+    atexit.register(lambda: logger.info("👋 Bot shutting down"))
+    
+    # IMPORTANT: Setup instructions for 24/7 operation
+    logger.info("\n" + "="*80)
+    logger.info("🔄 FOR 24/7 OPERATION:")
+    logger.info("="*80)
+    logger.info("✅ INTERNAL: Keep-alive pinger started (pings every 5 minutes)")
+    logger.info("📋 EXTERNAL: Set up uptime monitoring:")
+    logger.info("   1. Go to https://uptimerobot.com/")
+    logger.info("   2. Create free account")
+    logger.info("   3. Add new monitor:")
+    logger.info("      - Monitor Type: HTTP(s)")
+    logger.info("      - Friendly Name: Diamond Trading Bot")
+    logger.info("      - URL: https://telegram-bot-6iil.onrender.com/keep-alive")
+    logger.info("      - Monitoring Interval: 5 minutes")
+    logger.info("="*80)
+    logger.info("📞 Monitoring URLs:")
+    logger.info(f"   • Health Check: {CONFIG['RENDER_EXTERNAL_URL']}/health")
+    logger.info(f"   • Keep-Alive: {CONFIG['RENDER_EXTERNAL_URL']}/keep-alive")
+    logger.info(f"   • Status: {CONFIG['RENDER_EXTERNAL_URL']}/status")
+    logger.info(f"   • Debug: {CONFIG['RENDER_EXTERNAL_URL']}/debug")
+    logger.info("="*80 + "\n")
+    
+    import uvicorn
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=CONFIG["PORT"],
+        log_level="info"
+    )
