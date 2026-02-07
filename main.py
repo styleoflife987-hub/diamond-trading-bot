@@ -54,7 +54,7 @@ def load_env_config():
         "AWS_SECRET_ACCESS_KEY": os.getenv("AWS_SECRET_ACCESS_KEY"),
         "AWS_REGION": os.getenv("AWS_REGION", "ap-south-1"),
         "AWS_BUCKET": os.getenv("AWS_BUCKET", "diamond-bucket-styleoflifes"),
-        "PORT": int(os.getenv("PORT", "8000")),
+        "PORT": int(os.getenv("PORT", "10000")),
         "SESSION_TIMEOUT": int(os.getenv("SESSION_TIMEOUT", "3600")),
         "RATE_LIMIT": int(os.getenv("RATE_LIMIT", "5")),
         "RATE_LIMIT_WINDOW": int(os.getenv("RATE_LIMIT_WINDOW", "10")),
