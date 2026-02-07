@@ -1,4 +1,3 @@
-# fly.toml - Diamond Trading Bot
 app = "diamond-trading-bot-fly"
 primary_region = "ams"
 kill_signal = "SIGINT"
