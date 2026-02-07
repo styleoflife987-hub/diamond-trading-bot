@@ -1,3 +1,8 @@
+"""
+Diamond Trading Bot - Complete Version
+Optimized for Fly.io deployment
+"""
+
 import asyncio
 import pandas as pd
 import boto3
@@ -22,21 +27,25 @@ from fastapi.responses import JSONResponse, FileResponse
 import atexit
 import httpx
 
-# -------- SETUP LOGGING --------
+# ============= FLY.IO CONFIGURATION =============
+FLY_APP_NAME = os.getenv("FLY_APP_NAME", "diamond-trading-bot-fly")
+FLY_APP_URL = f"https://{FLY_APP_NAME}.fly.dev"
+
+# ============= SETUP LOGGING =============
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# -------- GLOBAL FLAGS --------
+# ============= GLOBAL FLAGS =============
 BOT_STARTED = False
 READ_ONLY_ACCOUNTS = False
 
-# -------- TIMEZONE --------
+# ============= TIMEZONE =============
 IST = pytz.timezone("Asia/Kolkata")
 
-# -------- STATUS CONSTANTS --------
+# ============= STATUS CONSTANTS =============
 YES = "YES"
 NO = "NO"
 STATUS_PENDING = "PENDING"
@@ -45,7 +54,7 @@ STATUS_REJECTED = "REJECTED"
 STATUS_COMPLETED = "COMPLETED"
 STATUS_CLOSED = "CLOSED"
 
-# -------- CONFIGURATION --------
+# ============= CONFIGURATION =============
 def load_env_config():
     """Load and validate all environment variables"""
     config = {
@@ -54,13 +63,12 @@ def load_env_config():
         "AWS_SECRET_ACCESS_KEY": os.getenv("AWS_SECRET_ACCESS_KEY"),
         "AWS_REGION": os.getenv("AWS_REGION", "ap-south-1"),
         "AWS_BUCKET": os.getenv("AWS_BUCKET", "diamond-bucket-styleoflifes"),
-        "PORT": int(os.getenv("PORT", "10000")),
+        "PORT": int(os.getenv("PORT", "8000")),
         "SESSION_TIMEOUT": int(os.getenv("SESSION_TIMEOUT", "3600")),
         "RATE_LIMIT": int(os.getenv("RATE_LIMIT", "5")),
         "RATE_LIMIT_WINDOW": int(os.getenv("RATE_LIMIT_WINDOW", "10")),
-        "WEBHOOK_URL": os.getenv("WEBHOOK_URL", ""),
+        "WEBHOOK_URL": os.getenv("WEBHOOK_URL", f"{FLY_APP_URL}/webhook"),
         "TEST_CHAT_ID": os.getenv("TEST_CHAT_ID", ""),
-        "RENDER_EXTERNAL_URL": os.getenv("RENDER_EXTERNAL_URL", "https://telegram-bot-fill.onrender.com"),
     }
     
     # Validate required configurations
@@ -70,28 +78,23 @@ def load_env_config():
     if not all([config["AWS_ACCESS_KEY_ID"], config["AWS_SECRET_ACCESS_KEY"], config["AWS_BUCKET"]]):
         logger.warning("AWS credentials not fully set. Some features may not work.")
     
-    # Auto-generate webhook URL if not set
-    if not config["WEBHOOK_URL"]:
-        render_url = config["RENDER_EXTERNAL_URL"]
-        config["WEBHOOK_URL"] = f"{render_url}/webhook"
-        logger.info(f"Auto-generated webhook URL: {config['WEBHOOK_URL']}")
-    
     logger.info(f"✅ Config loaded: BOT_TOKEN present: {bool(config['BOT_TOKEN'])}")
     logger.info(f"🌐 Webhook URL: {config['WEBHOOK_URL']}")
     logger.info(f"📦 S3 Bucket: {config['AWS_BUCKET']}")
+    logger.info(f"🚀 Fly.io URL: {FLY_APP_URL}")
     
     return config
 
 CONFIG = load_env_config()
 
-# -------- AWS CONFIGURATION --------
+# ============= AWS CONFIGURATION =============
 AWS_CONFIG = {
     "aws_access_key_id": CONFIG["AWS_ACCESS_KEY_ID"],
     "aws_secret_access_key": CONFIG["AWS_SECRET_ACCESS_KEY"],
     "region_name": CONFIG["AWS_REGION"]
 }
 
-# -------- S3 KEYS --------
+# ============= S3 KEYS =============
 ACCOUNTS_KEY = "users/accounts.xlsx"
 STOCK_KEY = "stock/diamonds.xlsx"
 SUPPLIER_STOCK_FOLDER = "stock/suppliers/"
@@ -102,14 +105,14 @@ DEAL_HISTORY_KEY = "deals/deal_history.xlsx"
 NOTIFICATIONS_FOLDER = "notifications/"
 SESSION_KEY = "sessions/logged_in_users.json"
 
-# -------- STARTUP CACHE --------
+# ============= STARTUP CACHE =============
 startup_cache = {
     "accounts": None,
     "stock": None,
     "last_loaded": 0
 }
 
-# -------- INITIALIZE AWS CLIENTS --------
+# ============= INITIALIZE AWS CLIENTS =============
 try:
     s3 = boto3.client("s3", **{k: v for k, v in AWS_CONFIG.items() if v})
     logger.info("✅ AWS S3 client initialized")
@@ -117,18 +120,18 @@ except Exception as e:
     logger.error(f"❌ Failed to initialize S3 client: {e}")
     s3 = None
 
-# -------- INITIALIZE BOT --------
+# ============= INITIALIZE BOT =============
 bot = Bot(token=CONFIG["BOT_TOKEN"])
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# -------- GLOBAL DATA STORES --------
+# ============= GLOBAL DATA STORES =============
 logged_in_users = {}
 user_state = {}
 user_rate_limit = {}
 
-# -------- KEYBOARDS --------
+# ============= KEYBOARDS =============
 admin_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="💎 View All Stock")],
@@ -165,7 +168,7 @@ supplier_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# -------- TEXT CLEANING FUNCTIONS --------
+# ============= TEXT CLEANING FUNCTIONS =============
 def clean_text(value: Any) -> str:
     """Clean and normalize text values"""
     if value is None:
@@ -196,7 +199,7 @@ def safe_excel(val: Any) -> Any:
         return "'" + val
     return val
 
-# -------- USER MANAGEMENT FUNCTIONS --------
+# ============= USER MANAGEMENT FUNCTIONS =============
 def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
     """Get user by username from logged_in_users"""
     username = normalize_text(username)
@@ -234,7 +237,7 @@ def touch_session(uid: int):
         logged_in_users[uid]["last_active"] = time.time()
         save_sessions()
 
-# -------- SESSION MANAGEMENT --------
+# ============= SESSION MANAGEMENT =============
 def save_sessions():
     """Save sessions to S3"""
     try:
@@ -245,7 +248,6 @@ def save_sessions():
                 Body=json.dumps(logged_in_users, default=str),
                 ContentType="application/json"
             )
-            logger.info(f"✅ Saved {len(logged_in_users)} active sessions")
     except Exception as e:
         logger.error(f"❌ Failed to save sessions: {e}")
 
@@ -275,12 +277,11 @@ def cleanup_sessions():
         user_data = logged_in_users.pop(uid, None)
         if user_data:
             log_activity(user_data, "SESSION_EXPIRED")
-            logger.info(f"Expired session for user: {user_data.get('USERNAME')}")
     
     if expired:
         save_sessions()
 
-# -------- RATE LIMITING --------
+# ============= RATE LIMITING =============
 def is_rate_limited(uid: int) -> bool:
     """Check if user is rate limited"""
     now = time.time()
@@ -297,15 +298,13 @@ def is_rate_limited(uid: int) -> bool:
     user_rate_limit[uid] = history[-10:]
     return False
 
-# -------- DATA LOADING/SAVING --------
+# ============= DATA LOADING/SAVING =============
 def load_accounts(cached=True) -> pd.DataFrame:
     """Load accounts from Excel file in S3 with caching"""
     global startup_cache
     
     try:
-        # Return cached data if available and not too old (5 minutes)
         if cached and startup_cache["accounts"] is not None and (time.time() - startup_cache["last_loaded"]) < 300:
-            logger.info("✅ Using cached accounts data")
             return startup_cache["accounts"]
             
         if not s3:
@@ -326,7 +325,6 @@ def load_accounts(cached=True) -> pd.DataFrame:
         
         logger.info(f"✅ Loaded {len(df)} accounts from S3")
         
-        # Cache the data
         startup_cache["accounts"] = df
         startup_cache["last_loaded"] = time.time()
         
@@ -352,24 +350,18 @@ def save_accounts(df: pd.DataFrame):
         s3.upload_file(local_path, CONFIG["AWS_BUCKET"], ACCOUNTS_KEY)
         logger.info(f"✅ Saved {len(df)} accounts to S3")
         
-        # Update cache
         startup_cache["accounts"] = df
         startup_cache["last_loaded"] = time.time()
         
     except Exception as e:
         logger.error(f"❌ Failed to save accounts: {e}")
-    finally:
-        if os.path.exists(local_path):
-            os.remove(local_path)
 
 def load_stock(cached=True) -> pd.DataFrame:
     """Load combined stock from S3 with caching"""
     global startup_cache
     
     try:
-        # Return cached data if available and not too old (5 minutes)
         if cached and startup_cache["stock"] is not None and (time.time() - startup_cache["last_loaded"]) < 300:
-            logger.info("✅ Using cached stock data")
             return startup_cache["stock"]
             
         if not s3:
@@ -384,7 +376,6 @@ def load_stock(cached=True) -> pd.DataFrame:
             logger.warning(f"⚠️ No combined stock file found: {e}")
             return pd.DataFrame()
         
-        # Cache the data
         startup_cache["stock"] = df
         startup_cache["last_loaded"] = time.time()
         
@@ -393,7 +384,7 @@ def load_stock(cached=True) -> pd.DataFrame:
         logger.warning(f"⚠️ Failed to load stock: {e}")
         return pd.DataFrame()
 
-# -------- ACTIVITY LOGGING --------
+# ============= ACTIVITY LOGGING =============
 def log_activity(user: Dict[str, Any], action: str, details: Optional[Dict] = None):
     """Log user activity to S3"""
     try:
@@ -428,66 +419,10 @@ def log_activity(user: Dict[str, Any], action: str, details: Optional[Dict] = No
             ContentType="application/json"
         )
         
-        logger.info(f"📝 Logged activity: {user.get('USERNAME')} - {action}")
-        
     except Exception as e:
         logger.error(f"❌ Failed to log activity: {e}")
 
-def generate_activity_excel() -> Optional[str]:
-    """Generate Excel report of all activities"""
-    try:
-        if not s3:
-            return None
-            
-        objs = s3.list_objects_v2(
-            Bucket=CONFIG["AWS_BUCKET"],
-            Prefix=ACTIVITY_LOG_FOLDER
-        )
-
-        if "Contents" not in objs or not objs["Contents"]:
-            return None
-
-        rows = []
-
-        for obj in objs["Contents"]:
-            if not obj["Key"].endswith(".json"):
-                continue
-
-            try:
-                raw = s3.get_object(
-                    Bucket=CONFIG["AWS_BUCKET"],
-                    Key=obj["Key"]
-                )["Body"].read().decode("utf-8")
-
-                data = json.loads(raw)
-                for entry in data:
-                    rows.append({
-                        "Date": entry.get("date"),
-                        "Time": entry.get("time"),
-                        "Login ID": entry.get("login_id"),
-                        "Role": entry.get("role"),
-                        "Action": entry.get("action"),
-                        "Details": json.dumps(entry.get("details", {}))
-                    })
-            except Exception as e:
-                logger.error(f"Failed to read activity file {obj['Key']}: {e}")
-                continue
-
-        if not rows:
-            return None
-
-        df = pd.DataFrame(rows)
-        path = "/tmp/user_activity_report.xlsx"
-        df.to_excel(path, index=False)
-        
-        logger.info(f"✅ Generated activity report with {len(rows)} entries")
-        return path
-
-    except Exception as e:
-        logger.error(f"❌ Activity report error: {e}")
-        return None
-
-# -------- NOTIFICATION SYSTEM --------
+# ============= NOTIFICATION SYSTEM =============
 def save_notification(username: str, role: str, message: str):
     """Save notification for user"""
     try:
@@ -533,7 +468,6 @@ def fetch_unread_notifications(username: str, role: str) -> List[Dict]:
         
         unread = [n for n in data if not n.get("read")]
         
-        # Mark as read
         for n in data:
             n["read"] = True
         
@@ -549,53 +483,26 @@ def fetch_unread_notifications(username: str, role: str) -> List[Dict]:
     except Exception:
         return []
 
-# -------- EXCEL VALIDATION & PARSING --------
+# ============= EXCEL VALIDATOR =============
 class DiamondExcelValidator:
-    """Validate diamond stock Excel files with flexible optional columns"""
+    """Validate diamond stock Excel files"""
     
-    # REQUIRED columns - MUST have values
     REQUIRED_COLUMNS = [
-        'Stock #',
-        'Shape', 
-        'Weight',
-        'Color',
-        'Clarity',
-        'Price Per Carat',
-        'Lab', 
-        'Report #',
-        'Diamond Type',
-        'Description'
+        'Stock #', 'Shape', 'Weight', 'Color', 'Clarity',
+        'Price Per Carat', 'Lab', 'Report #', 'Diamond Type', 'Description'
     ]
     
-    # OPTIONAL columns - can be BLANK/EMPTY
-    OPTIONAL_COLUMNS = [
-        'CUT',
-        'Polish',
-        'Symmetry'
-    ]
-    
+    OPTIONAL_COLUMNS = ['CUT', 'Polish', 'Symmetry']
     ALL_COLUMNS = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
     
     @staticmethod
     def validate_and_parse(df: pd.DataFrame, supplier_name: str) -> Tuple[bool, pd.DataFrame, List[str], List[str]]:
-        """
-        Validate and clean Excel data
-        
-        Args:
-            df: Pandas DataFrame from Excel
-            supplier_name: Name of supplier
-            
-        Returns:
-            Tuple: (success, cleaned_df, errors, warnings)
-        """
         errors = []
         warnings = []
         
         try:
-            # Clean column names
             df.columns = [str(col).strip() for col in df.columns]
             
-            # Check for missing REQUIRED columns
             missing_required = []
             for req_col in DiamondExcelValidator.REQUIRED_COLUMNS:
                 if req_col not in df.columns:
@@ -605,46 +512,41 @@ class DiamondExcelValidator:
                 errors.append(f'Missing required columns: {", ".join(missing_required)}')
                 return False, pd.DataFrame(), errors, warnings
             
-            # Check for OPTIONAL columns (just warning, not error)
             missing_optional = []
             for opt_col in DiamondExcelValidator.OPTIONAL_COLUMNS:
                 if opt_col not in df.columns:
                     missing_optional.append(opt_col)
             
             if missing_optional:
-                warnings.append(f'Optional columns not found (will be ignored): {", ".join(missing_optional)}')
+                warnings.append(f'Optional columns not found: {", ".join(missing_optional)}')
             
-            # Clean data
             df = df.copy()
             for col in df.columns:
                 if col in df.select_dtypes(include=['object']).columns:
                     df[col] = df[col].fillna('').astype(str).apply(clean_text)
             
-            # Validate REQUIRED columns are not empty
             for req_col in DiamondExcelValidator.REQUIRED_COLUMNS:
                 if req_col in df.columns:
                     empty_mask = df[req_col].isna() | (df[req_col] == '')
                     if empty_mask.any():
                         empty_count = empty_mask.sum()
-                        errors.append(f'{req_col}: {empty_count} rows are empty (required)')
+                        errors.append(f'{req_col}: {empty_count} rows are empty')
             
-            # Check for duplicate Stock #
             if 'Stock #' in df.columns:
                 duplicate_mask = df.duplicated('Stock #', keep=False)
                 if duplicate_mask.any():
                     duplicates = df[duplicate_mask]['Stock #'].unique().tolist()
-                    errors.append(f'Duplicate Stock # found: {", ".join(duplicates[:5])}')
+                    errors.append(f'Duplicate Stock #: {", ".join(duplicates[:5])}')
             
-            # Validate numeric columns
             if 'Weight' in df.columns:
                 try:
                     df['Weight'] = pd.to_numeric(df['Weight'], errors='coerce')
                     invalid_weights = df['Weight'].isna() | (df['Weight'] <= 0)
                     if invalid_weights.any():
                         invalid_count = invalid_weights.sum()
-                        errors.append(f'Weight: {invalid_count} rows have invalid values (must be > 0)')
+                        errors.append(f'Weight: {invalid_count} invalid values')
                 except:
-                    errors.append('Weight: Could not convert to numeric values')
+                    errors.append('Weight: Could not convert to numeric')
             
             if 'Price Per Carat' in df.columns:
                 try:
@@ -652,44 +554,32 @@ class DiamondExcelValidator:
                     invalid_prices = df['Price Per Carat'].isna() | (df['Price Per Carat'] <= 0)
                     if invalid_prices.any():
                         invalid_count = invalid_prices.sum()
-                        errors.append(f'Price Per Carat: {invalid_count} rows have invalid values (must be > 0)')
+                        errors.append(f'Price Per Carat: {invalid_count} invalid values')
                 except:
-                    errors.append('Price Per Carat: Could not convert to numeric values')
+                    errors.append('Price Per Carat: Could not convert to numeric')
             
             if errors:
                 return False, pd.DataFrame(), errors, warnings
             
-            # Add metadata columns
             df['SUPPLIER'] = supplier_name
             df['LOCKED'] = 'NO'
             df['UPLOADED_AT'] = datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')
             
-            # Ensure all columns are present
             for col in DiamondExcelValidator.ALL_COLUMNS:
                 if col not in df.columns:
                     df[col] = ''
             
-            # Handle optional columns - if empty, leave as empty string
-            for opt_col in DiamondExcelValidator.OPTIONAL_COLUMNS:
-                if opt_col in df.columns:
-                    # Already cleaned, keep as is (can be empty)
-                    pass
-            
-            # Reorder columns for consistency
             desired_order = ['Stock #', 'Shape', 'Weight', 'Color', 'Clarity', 
                            'Price Per Carat', 'Lab', 'Report #', 'Diamond Type', 
                            'Description', 'CUT', 'Polish', 'Symmetry',
                            'SUPPLIER', 'LOCKED', 'UPLOADED_AT']
             
-            # Add missing columns with empty values
             for col in desired_order:
                 if col not in df.columns:
                     df[col] = ''
             
-            # Select only desired columns in order
             df = df[desired_order]
             
-            # Apply safe_excel to all string columns
             for col in df.select_dtypes(include=['object']).columns:
                 df[col] = df[col].apply(lambda x: safe_excel(x) if isinstance(x, str) else x)
             
@@ -699,7 +589,7 @@ class DiamondExcelValidator:
             errors.append(f'Validation error: {str(e)}')
             return False, pd.DataFrame(), errors, warnings
 
-# -------- STOCK MANAGEMENT --------
+# ============= STOCK MANAGEMENT =============
 def rebuild_combined_stock():
     """Rebuild combined stock from all supplier files"""
     try:
@@ -712,7 +602,6 @@ def rebuild_combined_stock():
         )
         
         if "Contents" not in objs:
-            # No supplier files, create empty combined stock
             empty_df = pd.DataFrame(columns=[
                 'Stock #', 'Shape', 'Weight', 'Color', 'Clarity', 
                 'Price Per Carat', 'Lab', 'Report #', 'Diamond Type', 
@@ -771,9 +660,8 @@ def rebuild_combined_stock():
         final_df.to_excel(local_path, index=False)
         s3.upload_file(local_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
         
-        logger.info(f"✅ Rebuilt combined stock with {len(final_df)} items from {len(dfs)} suppliers")
+        logger.info(f"✅ Rebuilt combined stock with {len(final_df)} items")
         
-        # Update cache
         startup_cache["stock"] = final_df
         startup_cache["last_loaded"] = time.time()
         
@@ -835,8 +723,6 @@ def atomic_lock_stone(stone_id: str) -> bool:
                     pass
         
         logger.info(f"✅ Locked stone: {stone_id}")
-        
-        # Clear cache to force reload
         startup_cache["stock"] = None
         
         return True
@@ -890,8 +776,6 @@ def unlock_stone(stone_id: str):
                     pass
         
         logger.info(f"✅ Unlocked stone: {stone_id}")
-        
-        # Clear cache to force reload
         startup_cache["stock"] = None
         
     except Exception as e:
@@ -935,14 +819,12 @@ def remove_stone_from_supplier_and_combined(stone_id: str):
                     break
         
         logger.info(f"✅ Removed stone {stone_id} from all stock files")
-        
-        # Clear cache to force reload
         startup_cache["stock"] = None
         
     except Exception as e:
         logger.error(f"❌ Failed to remove stone {stone_id}: {e}")
 
-# -------- DEAL MANAGEMENT --------
+# ============= DEAL MANAGEMENT =============
 def log_deal_history(deal: Dict[str, Any]):
     """Log deal to history file"""
     try:
@@ -988,13 +870,12 @@ def log_deal_history(deal: Dict[str, Any]):
             except:
                 pass
 
-# -------- BACKGROUND TASKS --------
+# ============= BACKGROUND TASKS =============
 async def session_cleanup_loop():
     """Background task to clean up expired sessions"""
     while True:
         try:
             cleanup_sessions()
-            logger.debug("✅ Session cleanup completed")
         except Exception as e:
             logger.error(f"❌ Session cleanup error: {e}")
         await asyncio.sleep(600)
@@ -1013,9 +894,6 @@ async def user_state_cleanup_loop():
             
             for uid in stale_users:
                 user_state.pop(uid, None)
-            
-            if stale_users:
-                logger.info(f"✅ Cleaned up {len(stale_users)} stale user states")
                 
         except Exception as e:
             logger.error(f"❌ User state cleanup error: {e}")
@@ -1023,19 +901,19 @@ async def user_state_cleanup_loop():
         await asyncio.sleep(300)
 
 async def keep_alive_pinger():
-    """Ping the server periodically to keep it alive"""
+    """Ping the server periodically"""
     logger.info("🚀 Starting keep-alive pinger...")
     
     while True:
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.get(f"{CONFIG['RENDER_EXTERNAL_URL']}/keep-alive")
+                response = await client.get(f"{FLY_APP_URL}/keep-alive")
                 logger.info(f"✅ Keep-alive ping: {response.status_code} at {datetime.now()}")
         except Exception as e:
             logger.warning(f"⚠️ Keep-alive ping failed: {e}")
-        await asyncio.sleep(300)  # Ping every 5 minutes
+        await asyncio.sleep(300)
 
-# -------- LIFESPAN MANAGER --------
+# ============= LIFESPAN MANAGER =============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan manager for startup/shutdown"""
@@ -1045,12 +923,11 @@ async def lifespan(app: FastAPI):
     logger.info("🤖 Diamond Trading Bot starting up...")
     
     try:
-        # Load sessions
         load_sessions()
         
         # Set webhook
         webhook_url = CONFIG["WEBHOOK_URL"]
-        if webhook_url and "your-app-name" not in webhook_url:
+        if webhook_url:
             await bot.set_webhook(
                 url=webhook_url,
                 drop_pending_updates=True,
@@ -1058,7 +935,7 @@ async def lifespan(app: FastAPI):
             )
             logger.info(f"✅ Webhook set to: {webhook_url}")
         else:
-            logger.warning("⚠️ No valid webhook URL set")
+            logger.warning("⚠️ No webhook URL set")
         
     except Exception as e:
         logger.error(f"❌ Startup error: {e}")
@@ -1068,27 +945,23 @@ async def lifespan(app: FastAPI):
     # Start background tasks
     asyncio.create_task(session_cleanup_loop())
     asyncio.create_task(user_state_cleanup_loop())
-    # Start keep-alive pinger (NEW)
     asyncio.create_task(keep_alive_pinger())
     
     logger.info("✅ Bot startup complete")
     
-    yield  # App runs here
+    yield
     
     # Shutdown
     logger.info("🤖 Diamond Trading Bot shutting down...")
     
-    # Remove webhook
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("✅ Webhook removed")
     except Exception as e:
         logger.error(f"❌ Failed to remove webhook: {e}")
     
-    # Save sessions before shutdown
     save_sessions()
     
-    # Close bot session
     try:
         await bot.session.close()
         logger.info("✅ Bot session closed")
@@ -1098,26 +971,24 @@ async def lifespan(app: FastAPI):
     BOT_STARTED = False
     logger.info("✅ Bot shutdown complete")
 
-# -------- PRELOAD DATA --------
+# ============= PRELOAD DATA =============
 def preload_data():
     """Preload data on startup for faster response"""
     logger.info("🔄 Preloading data on startup...")
     try:
-        # Load accounts in background
         load_accounts()
         logger.info("✅ Accounts preloaded")
         
-        # Load stock in background
         load_stock()
         logger.info("✅ Stock preloaded")
         
     except Exception as e:
         logger.error(f"❌ Preloading failed: {e}")
 
-# -------- FASTAPI APP --------
+# ============= FASTAPI APP =============
 app = FastAPI(title="Diamond Trading Bot", lifespan=lifespan)
 
-# -------- HEALTH CHECK ENDPOINTS --------
+# ============= HEALTH CHECK ENDPOINTS =============
 @app.get("/")
 async def root():
     return {
@@ -1129,15 +1000,15 @@ async def root():
         "timestamp": datetime.now().isoformat(),
         "active_sessions": len(logged_in_users),
         "aws_connected": s3 is not None,
-        "bucket": CONFIG["AWS_BUCKET"]
+        "bucket": CONFIG["AWS_BUCKET"],
+        "fly_app_url": FLY_APP_URL
     }
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint for Render monitoring"""
+    """Health check endpoint"""
     status = "healthy" if BOT_STARTED else "starting"
     
-    # Test AWS connection if available
     aws_status = "connected" if s3 else "disconnected"
     bucket_accessible = False
     
@@ -1155,8 +1026,7 @@ async def health_check():
         "aws": aws_status,
         "bucket_accessible": bucket_accessible,
         "active_users": len(logged_in_users),
-        "timestamp": datetime.now().isoformat(),
-        "message": "Use /keep-alive endpoint for uptime monitoring"
+        "timestamp": datetime.now().isoformat()
     }
 
 @app.get("/ping")
@@ -1173,15 +1043,14 @@ async def ping():
 
 @app.get("/keep-alive")
 async def keep_alive():
-    """Endpoint for uptime monitoring services to ping"""
+    """Endpoint for uptime monitoring"""
     return {
         "status": "alive",
         "timestamp": datetime.now().isoformat(),
         "bot_status": "running" if BOT_STARTED else "starting",
         "active_sessions": len(logged_in_users),
         "cache_hit": startup_cache["accounts"] is not None,
-        "message": "Bot is kept alive by monitoring service",
-        "keep_alive_url": f"{CONFIG['RENDER_EXTERNAL_URL']}/health"
+        "fly_app": FLY_APP_NAME
     }
 
 @app.get("/status")
@@ -1207,6 +1076,11 @@ async def status_check():
             "bucket_accessible": None
         },
         
+        "fly": {
+            "app_name": FLY_APP_NAME,
+            "app_url": FLY_APP_URL
+        },
+        
         "system": {
             "python_version": "3.11.0",
             "port": CONFIG.get("PORT"),
@@ -1216,7 +1090,6 @@ async def status_check():
         }
     }
     
-    # Test AWS connection
     if s3:
         try:
             s3.list_objects_v2(Bucket=CONFIG["AWS_BUCKET"], MaxKeys=1)
@@ -1239,7 +1112,6 @@ async def get_sessions():
 async def debug_info():
     """Debug endpoint to check system status"""
     try:
-        # Check S3 connection
         s3_status = "connected" if s3 else "disconnected"
         bucket_accessible = False
         s3_error = None
@@ -1252,7 +1124,6 @@ async def debug_info():
                 bucket_accessible = False
                 s3_error = str(e)
         
-        # Check bot status
         webhook_info = {}
         try:
             webhook_info = await bot.get_webhook_info()
@@ -1290,16 +1161,15 @@ async def debug_info():
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
-# -------- NEW API ENDPOINTS FOR EXCEL UPLOAD --------
+# ============= NEW API ENDPOINTS =============
 @app.post("/api/upload-excel")
 async def api_upload_excel(
     file: UploadFile = File(...),
     telegram_id: str = Form(...),
     username: str = Form(...)
 ):
-    """API endpoint for Excel upload with flexible optional columns"""
+    """API endpoint for Excel upload"""
     try:
-        # Check if user exists and is supplier
         user = get_user_by_username(username)
         if not user or user.get("ROLE") != "supplier":
             return JSONResponse(
@@ -1307,25 +1177,21 @@ async def api_upload_excel(
                 content={"success": False, "message": "Only suppliers can upload stock"}
             )
         
-        # Check file size
-        if file.size > 10 * 1024 * 1024:  # 10MB
+        if file.size > 10 * 1024 * 1024:
             return JSONResponse(
                 status_code=400,
                 content={"success": False, "message": "File size exceeds 10MB limit"}
             )
         
-        # Check file extension
         if not file.filename.endswith(('.xlsx', '.xls')):
             return JSONResponse(
                 status_code=400,
                 content={"success": False, "message": "Only Excel files (.xlsx, .xls) are allowed"}
             )
         
-        # Read Excel file
         contents = await file.read()
         df = pd.read_excel(BytesIO(contents))
         
-        # Validate and parse Excel
         supplier_name = f"supplier_{username.lower()}"
         validator = DiamondExcelValidator()
         success, cleaned_df, errors, warnings = validator.validate_and_parse(df, supplier_name)
@@ -1341,7 +1207,6 @@ async def api_upload_excel(
                 }
             )
         
-        # Save to S3
         supplier_file = f"{SUPPLIER_STOCK_FOLDER}{supplier_name}.xlsx"
         temp_path = f"/tmp/{supplier_name}.xlsx"
         cleaned_df.to_excel(temp_path, index=False)
@@ -1350,15 +1215,12 @@ async def api_upload_excel(
             s3.upload_file(temp_path, CONFIG["AWS_BUCKET"], supplier_file)
             logger.info(f"✅ Uploaded {len(cleaned_df)} diamonds for supplier {username}")
         
-        # Rebuild combined stock
         rebuild_combined_stock()
         
-        # Calculate statistics
         total_stones = len(cleaned_df)
         total_carats = cleaned_df["Weight"].sum() if "Weight" in cleaned_df.columns else 0
         total_value = (cleaned_df["Weight"] * cleaned_df["Price Per Carat"]).sum() if "Weight" in cleaned_df.columns and "Price Per Carat" in cleaned_df.columns else 0
         
-        # Log activity
         log_activity(user, "API_UPLOAD_STOCK", {
             "stones": total_stones,
             "carats": total_carats,
@@ -1366,7 +1228,6 @@ async def api_upload_excel(
             "warnings": warnings
         })
         
-        # Clean up
         if os.path.exists(temp_path):
             os.remove(temp_path)
         
@@ -1396,7 +1257,6 @@ async def api_upload_excel(
 async def api_download_template():
     """Download sample Excel template"""
     try:
-        # Create sample Excel template
         sample_data = {
             "Stock #": ["DIA001", "DIA002", "DIA003"],
             "Shape": ["Round", "Princess", "Oval"],
@@ -1409,7 +1269,6 @@ async def api_download_template():
             "Diamond Type": ["Natural", "Natural", "Lab Grown"],
             "Description": ["Eye clean round", "Excellent princess", "Nice oval"],
             
-            # OPTIONAL COLUMNS (can be blank)
             "CUT": ["EX", "VG", ""],
             "Polish": ["EX", "", "VG"],
             "Symmetry": ["EX", "VG", ""]
@@ -1417,12 +1276,10 @@ async def api_download_template():
         
         df = pd.DataFrame(sample_data)
         
-        # Create Excel file in memory
         buffer = BytesIO()
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             df.to_excel(writer, sheet_name='Sample Stock', index=False)
             
-            # Add instructions sheet
             instructions_data = {
                 "Column Name": DiamondExcelValidator.ALL_COLUMNS,
                 "Required?": ["REQUIRED"] * len(DiamondExcelValidator.REQUIRED_COLUMNS) + 
@@ -1462,7 +1319,6 @@ async def api_download_template():
             instructions_df = pd.DataFrame(instructions_data)
             instructions_df.to_excel(writer, sheet_name='Instructions', index=False)
             
-            # Format column widths
             for column in instructions_df:
                 column_length = max(
                     instructions_df[column].astype(str).map(len).max(),
@@ -1473,7 +1329,6 @@ async def api_download_template():
         
         buffer.seek(0)
         
-        # Return as file download
         return FileResponse(
             path=buffer,
             media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -1506,7 +1361,7 @@ async def set_webhook_endpoint():
     """Manual endpoint to set webhook (for testing)"""
     try:
         webhook_url = CONFIG["WEBHOOK_URL"]
-        if not webhook_url or "your-app-name" in webhook_url:
+        if not webhook_url:
             return {"status": "error", "error": "Please set a valid WEBHOOK_URL in environment variables"}
         
         await bot.set_webhook(
@@ -1531,7 +1386,6 @@ async def delete_webhook_endpoint():
 async def test_bot():
     """Test if bot can send messages"""
     try:
-        # Send a test message to yourself
         test_chat_id = CONFIG.get("TEST_CHAT_ID")
         if test_chat_id and test_chat_id.isdigit():
             await bot.send_message(
@@ -1544,14 +1398,10 @@ async def test_bot():
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
-# ============================================================================
-# CRITICAL FIX: DOCUMENT HANDLER MUST COME BEFORE GENERAL MESSAGE HANDLER
-# ============================================================================
-
-# -------- DOCUMENT HANDLER (MUST COME FIRST) --------
+# ============= DOCUMENT HANDLER (MUST COME FIRST) =============
 @dp.message(F.document)
 async def handle_document(message: types.Message):
-    """Handle document uploads (Excel files) - THIS MUST BE FIRST"""
+    """Handle document uploads (Excel files)"""
     try:
         uid = message.from_user.id
         user = get_logged_user(uid)
@@ -1571,10 +1421,8 @@ async def handle_document(message: types.Message):
             await message.reply("❌ Only Excel files (.xlsx, .xls) are allowed.")
             return
         
-        # Send processing message
         processing_msg = await message.reply("🔄 Processing your Excel file...")
         
-        # Download file
         file = await bot.get_file(message.document.file_id)
         temp_path = f"/tmp/{uid}_{int(time.time())}_{file_name}"
         await bot.download_file(file.file_path, temp_path)
@@ -1589,7 +1437,6 @@ async def handle_document(message: types.Message):
         
         user_role = user["ROLE"]
         
-        # Handle based on role
         if user_role == "supplier":
             await handle_supplier_stock_upload(message, user, df, temp_path, processing_msg)
         else:
@@ -1606,7 +1453,7 @@ async def handle_document(message: types.Message):
             except:
                 pass
 
-# -------- COMMAND HANDLERS --------
+# ============= COMMAND HANDLERS =============
 @dp.message(Command("start"))
 async def start(message: types.Message):
     """Handle /start command"""
@@ -1688,7 +1535,6 @@ async def login_command(message: types.Message):
             await message.reply("⏳ Please wait before trying to login again.")
             return
         
-        # Check if already logged in
         user = get_logged_user(uid)
         if user:
             await message.reply(
@@ -1697,7 +1543,6 @@ async def login_command(message: types.Message):
             )
             return
         
-        # Start new login
         user_state[uid] = {
             "step": "login_username",
             "last_updated": time.time()
@@ -1752,10 +1597,8 @@ async def fix_state_command(message: types.Message):
         uid = message.from_user.id
         user_state.pop(uid, None)
         
-        # Clear rate limit
         user_rate_limit.pop(uid, None)
         
-        # Force reload cache
         global startup_cache
         startup_cache["accounts"] = None
         startup_cache["stock"] = None
@@ -1786,7 +1629,6 @@ async def upload_command(message: types.Message):
             await message.reply("❌ Only suppliers can upload stock.")
             return
         
-        # Clear any existing state
         user_state[uid] = {"upload_mode": True}
         
         await message.reply(
@@ -1839,7 +1681,7 @@ async def test_data_loading(message: types.Message):
     except Exception as e:
         await message.reply(f"❌ Data load failed: {e}")
 
-# -------- STATE HANDLER --------
+# ============= STATE HANDLER =============
 @dp.message()
 async def handle_all_messages(message: types.Message):
     """Main message handler for state-based flows"""
@@ -1849,22 +1691,18 @@ async def handle_all_messages(message: types.Message):
         
         logger.info(f"📩 Received message from {uid}: {text}")
         
-        # Rate limiting
         if is_rate_limited(uid):
             await message.reply("⏳ Too many messages. Please slow down.")
             return
         
-        # Update session activity if logged in
         user = get_logged_user(uid)
         if user:
             touch_session(uid)
         
-        # Handle state-based flows
         state = user_state.get(uid)
         if state:
             state["last_updated"] = time.time()
             
-            # Account creation flow
             if state.get("step") == "create_username":
                 username = text
                 
@@ -1924,7 +1762,6 @@ async def handle_all_messages(message: types.Message):
                 log_activity({"USERNAME": username, "ROLE": "client", "TELEGRAM_ID": uid}, "ACCOUNT_CREATED")
                 return
             
-            # Login flow
             elif state.get("step") == "login_username":
                 username = text
                 state["login_username"] = username
@@ -2009,17 +1846,14 @@ async def handle_all_messages(message: types.Message):
                 user_state.pop(uid, None)
                 return
             
-            # Diamond search flow
             elif state.get("step", "").startswith("search_"):
                 await handle_search_flow(message, state)
                 return
             
-            # Deal request flow
             elif state.get("step", "").startswith("deal_"):
                 await handle_deal_flow(message, state)
                 return
         
-        # Handle button presses for logged in users
         if user:
             await handle_logged_in_buttons(message, user)
         else:
@@ -2032,7 +1866,7 @@ async def handle_all_messages(message: types.Message):
         logger.error(f"❌ Error in handle_all_messages: {e}", exc_info=True)
         await message.reply(f"❌ An error occurred. Use /fix to reset.")
 
-# -------- SEARCH FLOW HANDLER --------
+# ============= SEARCH FLOW HANDLER =============
 async def handle_search_flow(message: types.Message, state: Dict):
     """Handle diamond search flow"""
     try:
@@ -2085,7 +1919,6 @@ async def handle_search_flow(message: types.Message, state: Dict):
             
             filtered_df = df.copy()
             
-            # Carat filter
             if search["carat"] != "any":
                 try:
                     if "-" in search["carat"]:
@@ -2105,21 +1938,18 @@ async def handle_search_flow(message: types.Message, state: Dict):
                     user_state.pop(uid, None)
                     return
             
-            # Shape filter
             if search["shape"] != "any":
                 shapes = [s.strip() for s in search["shape"].split(",")]
                 filtered_df = filtered_df[
                     filtered_df["Shape"].str.lower().isin([s.lower() for s in shapes])
                 ]
             
-            # Color filter
             if search["color"] != "any":
                 colors = [c.strip().upper() for c in search["color"].split(",")]
                 filtered_df = filtered_df[
                     filtered_df["Color"].str.upper().isin(colors)
                 ]
             
-            # Clarity filter
             if search["clarity"] != "any":
                 clarities = [c.strip().upper() for c in search["clarity"].split(",")]
                 filtered_df = filtered_df[
@@ -2179,7 +2009,7 @@ async def handle_search_flow(message: types.Message, state: Dict):
         await message.reply(f"❌ Search error: {type(e).__name__}. Please start over.")
         user_state.pop(uid, None)
 
-# -------- DEAL FLOW HANDLER --------
+# ============= DEAL FLOW HANDLER =============
 async def handle_deal_flow(message: types.Message, state: Dict):
     """Handle deal request flow"""
     try:
@@ -2296,7 +2126,7 @@ async def handle_deal_flow(message: types.Message, state: Dict):
         await message.reply(f"❌ Deal error: {type(e).__name__}. Please try again.")
         user_state.pop(uid, None)
 
-# -------- LOGGED IN BUTTON HANDLERS --------
+# ============= LOGGED IN BUTTON HANDLERS =============
 async def handle_logged_in_buttons(message: types.Message, user: Dict):
     """Handle button presses for logged in users"""
     try:
@@ -2309,12 +2139,10 @@ async def handle_logged_in_buttons(message: types.Message, user: Dict):
         
         logger.info(f"Button pressed: {text} by {user['USERNAME']} (role: {role})")
         
-        # Defensive check for empty buttons
         if not text:
             await message.reply("Please use the menu buttons.")
             return
         
-        # Admin buttons
         if role == "admin":
             if text == "💎 View All Stock":
                 await view_all_stock(message, user)
@@ -2335,7 +2163,6 @@ async def handle_logged_in_buttons(message: types.Message, user: Dict):
             else:
                 await message.reply("Please use the menu buttons.")
         
-        # Supplier buttons
         elif role == "supplier":
             if text == "📤 Upload Excel":
                 await upload_excel_prompt(message, user)
@@ -2352,7 +2179,6 @@ async def handle_logged_in_buttons(message: types.Message, user: Dict):
             else:
                 await message.reply("Please use the menu buttons.")
         
-        # Client buttons
         else:
             if text == "💎 Search Diamonds":
                 await search_diamonds_start(message, user)
@@ -2366,14 +2192,14 @@ async def handle_logged_in_buttons(message: types.Message, user: Dict):
                 await message.reply("Please use the menu buttons.")
                 
     except Exception as e:
-        logger.error(f"❌ Error in handle_logged_in_buttons: {e}", exc_info=True)
+        logger.error(f"❌ Error in handle_logged_in_buttons: {e}")
         await message.reply(
             f"❌ Button handler error.\n\n"
             f"**Error:** {type(e).__name__}\n"
             f"Please try again or use /fix to reset."
         )
 
-# -------- ADMIN HANDLERS --------
+# ============= ADMIN HANDLERS =============
 async def view_all_stock(message: types.Message, user: Dict):
     """Admin: View all stock"""
     try:
@@ -2545,24 +2371,61 @@ async def supplier_leaderboard(message: types.Message, user: Dict):
 async def user_activity_report(message: types.Message, user: Dict):
     """Admin: Generate activity report"""
     try:
-        excel_path = generate_activity_excel()
-        
-        if not excel_path:
+        objs = s3.list_objects_v2(
+            Bucket=CONFIG["AWS_BUCKET"],
+            Prefix=ACTIVITY_LOG_FOLDER
+        )
+
+        if "Contents" not in objs or not objs["Contents"]:
             await message.reply("❌ No activity logs found.")
             return
+
+        rows = []
+
+        for obj in objs["Contents"]:
+            if not obj["Key"].endswith(".json"):
+                continue
+
+            try:
+                raw = s3.get_object(
+                    Bucket=CONFIG["AWS_BUCKET"],
+                    Key=obj["Key"]
+                )["Body"].read().decode("utf-8")
+
+                data = json.loads(raw)
+                for entry in data:
+                    rows.append({
+                        "Date": entry.get("date"),
+                        "Time": entry.get("time"),
+                        "Login ID": entry.get("login_id"),
+                        "Role": entry.get("role"),
+                        "Action": entry.get("action"),
+                        "Details": json.dumps(entry.get("details", {}))
+                    })
+            except Exception as e:
+                logger.error(f"Failed to read activity file {obj['Key']}: {e}")
+                continue
+
+        if not rows:
+            await message.reply("❌ No activity logs found.")
+            return
+
+        df = pd.DataFrame(rows)
+        path = "/tmp/user_activity_report.xlsx"
+        df.to_excel(path, index=False)
         
         await message.reply_document(
-            types.FSInputFile(excel_path),
-            caption="📑 User Activity Report"
+            types.FSInputFile(path),
+            caption=f"📑 User Activity Report ({len(rows)} entries)"
         )
         
-        if os.path.exists(excel_path):
-            os.remove(excel_path)
+        if os.path.exists(path):
+            os.remove(path)
         
         log_activity(user, "DOWNLOAD_ACTIVITY_REPORT")
-        
+
     except Exception as e:
-        logger.error(f"❌ Error in user_activity_report: {e}")
+        logger.error(f"❌ Activity report error: {e}")
         await message.reply("❌ Failed to generate activity report.")
 
 async def delete_supplier_stock(message: types.Message, user: Dict):
@@ -2584,7 +2447,7 @@ async def delete_supplier_stock(message: types.Message, user: Dict):
         logger.error(f"❌ Error in delete_supplier_stock: {e}")
         await message.reply("❌ An error occurred.")
 
-# -------- SUPPLIER HANDLERS --------
+# ============= SUPPLIER HANDLERS =============
 async def upload_excel_prompt(message: types.Message, user: Dict):
     """Supplier: Prompt for Excel upload"""
     try:
@@ -2763,7 +2626,6 @@ async def supplier_analytics(message: types.Message, user: Dict):
 async def download_sample_excel(message: types.Message, user: Dict):
     """Supplier: Download sample Excel template"""
     try:
-        # Create sample data with optional columns blank
         sample_data = {
             "Stock #": ["D001", "D002", "D003"],
             "Shape": ["Round", "Oval", "Princess"],
@@ -2776,7 +2638,6 @@ async def download_sample_excel(message: types.Message, user: Dict):
             "Diamond Type": ["Natural", "Natural", "LGD"],
             "Description": ["Excellent cut round", "Nice oval diamond", "Good princess cut"],
             
-            # OPTIONAL COLUMNS - Some can be blank
             "CUT": ["EX", "VG", ""],
             "Polish": ["EX", "", "VG"],
             "Symmetry": ["EX", "VG", ""]
@@ -2838,7 +2699,7 @@ async def download_sample_excel(message: types.Message, user: Dict):
         logger.error(f"❌ Error in download_sample_excel: {e}")
         await message.reply("❌ Failed to generate sample template.")
 
-# -------- CLIENT HANDLERS --------
+# ============= CLIENT HANDLERS =============
 async def search_diamonds_start(message: types.Message, user: Dict):
     """Client: Start diamond search"""
     try:
@@ -3000,7 +2861,7 @@ async def request_deal_start(message: types.Message, user: Dict):
         logger.error(f"❌ Error in request_deal_start: {e}")
         await message.reply("❌ Failed to load available stones.")
 
-# -------- DEAL VIEWING --------
+# ============= DEAL VIEWING =============
 async def view_deals(message: types.Message, user: Dict):
     """View deals based on user role"""
     try:
@@ -3115,7 +2976,7 @@ async def view_deals(message: types.Message, user: Dict):
         logger.error(f"❌ Error in view_deals: {e}")
         await message.reply("❌ Failed to load deals.")
 
-# -------- CALLBACK QUERY HANDLERS --------
+# ============= CALLBACK QUERY HANDLERS =============
 @dp.callback_query(F.data.startswith("approve:"))
 async def approve_user_callback(callback: types.CallbackQuery):
     """Approve pending user account"""
@@ -3236,11 +3097,10 @@ async def cancel_delete(callback: types.CallbackQuery):
     )
     await callback.answer("Cancelled")
 
-# -------- SUPPLIER STOCK UPLOAD HANDLER --------
+# ============= SUPPLIER STOCK UPLOAD HANDLER =============
 async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str, processing_msg: types.Message):
-    """Handle supplier stock upload - IMPROVED WITH DETAILED RESPONSE"""
+    """Handle supplier stock upload"""
     try:
-        # Validate using the new validator
         supplier_name = f"supplier_{user['USERNAME'].lower()}"
         validator = DiamondExcelValidator()
         success, cleaned_df, errors, warnings = validator.validate_and_parse(df, supplier_name)
@@ -3261,7 +3121,6 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
             await processing_msg.edit_text(error_msg)
             return
         
-        # Save to S3
         supplier_file = f"{SUPPLIER_STOCK_FOLDER}{supplier_name}.xlsx"
         temp_supplier_path = f"/tmp/{supplier_name}.xlsx"
         
@@ -3271,14 +3130,12 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
             s3.upload_file(temp_supplier_path, CONFIG["AWS_BUCKET"], supplier_file)
             logger.info(f"✅ Uploaded {len(cleaned_df)} diamonds for supplier {supplier_name}")
         
-        # Rebuild combined stock
         rebuild_combined_stock()
         
         total_stones = len(cleaned_df)
         total_carats = cleaned_df["Weight"].sum() if "Weight" in cleaned_df.columns else 0
         total_value = (cleaned_df["Weight"] * cleaned_df["Price Per Carat"]).sum() if "Weight" in cleaned_df.columns and "Price Per Carat" in cleaned_df.columns else 0
         
-        # Send detailed success message
         success_msg = (
             f"✅ **Stock Upload Successful!**\n\n"
             f"📊 **Statistics:**\n"
@@ -3291,7 +3148,6 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
             f"• Max: ${cleaned_df['Price Per Carat'].max():,.0f}/ct\n\n"
         )
         
-        # Add shape distribution
         if "Shape" in cleaned_df.columns and not cleaned_df["Shape"].empty:
             shape_counts = cleaned_df["Shape"].value_counts().head(5)
             if not shape_counts.empty:
@@ -3306,10 +3162,8 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
             for warning in warnings[:3]:
                 success_msg += f"⚠️ {warning}\n"
         
-        # Send the success message
         await processing_msg.edit_text(success_msg)
         
-        # Also send a confirmation message
         await message.reply(
             f"📦 **Your stock has been saved!**\n"
             f"View it using '📦 My Stock' button.\n"
@@ -3330,278 +3184,7 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
         logger.error(f"❌ Error in handle_supplier_stock_upload: {e}", exc_info=True)
         await processing_msg.edit_text(f"❌ Failed to upload stock: {str(e)}")
 
-async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str, processing_msg: types.Message):
-    """Handle client bulk deal requests"""
-    try:
-        if "Stock #" not in df.columns or "Offer Price ($/ct)" not in df.columns:
-            await processing_msg.edit_text("❌ Invalid format. Need 'Stock #' and 'Offer Price ($/ct)' columns.")
-            return
-        
-        df = df.dropna(subset=["Stock #", "Offer Price ($/ct)"])
-        
-        if df.empty:
-            await processing_msg.edit_text("❌ No valid deal requests found.")
-            return
-        
-        stock_df = load_stock()
-        
-        successful_deals = 0
-        failed_deals = []
-        
-        for _, row in df.iterrows():
-            stone_id = str(row["Stock #"]).strip()
-            
-            try:
-                offer_price = float(row["Offer Price ($/ct)"])
-                if offer_price <= 0:
-                    failed_deals.append(f"{stone_id}: Invalid price")
-                    continue
-            except:
-                failed_deals.append(f"{stone_id}: Invalid price format")
-                continue
-            
-            stone_row = stock_df[stock_df["Stock #"] == stone_id]
-            
-            if stone_row.empty:
-                failed_deals.append(f"{stone_id}: Not found")
-                continue
-            
-            if stone_row.iloc[0].get("LOCKED") == "YES":
-                failed_deals.append(f"{stone_id}: Already locked")
-                continue
-            
-            deal_id = f"DEAL-{uuid.uuid4().hex[:10].upper()}"
-            stone_data = stone_row.iloc[0]
-            
-            deal = {
-                "deal_id": deal_id,
-                "stone_id": stone_id,
-                "supplier_username": stone_data.get("SUPPLIER", "").replace("supplier_", ""),
-                "client_username": user["USERNAME"],
-                "actual_stock_price": float(stone_data.get("Price Per Carat", 0)),
-                "client_offer_price": offer_price,
-                "supplier_action": "PENDING",
-                "admin_action": "PENDING",
-                "final_status": "OPEN",
-                "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
-            }
-            
-            if not atomic_lock_stone(stone_id):
-                failed_deals.append(f"{stone_id}: Lock failed")
-                continue
-            
-            if s3:
-                deal_key = f"{DEALS_FOLDER}{deal_id}.json"
-                s3.put_object(
-                    Bucket=CONFIG["AWS_BUCKET"],
-                    Key=deal_key,
-                    Body=json.dumps(deal, indent=2),
-                    ContentType="application/json"
-                )
-            
-            log_deal_history(deal)
-            
-            save_notification(
-                deal["supplier_username"],
-                "supplier",
-                f"📩 New bulk deal offer for Stone {stone_id}"
-            )
-            
-            successful_deals += 1
-        
-        result_msg = f"📊 **Bulk Deal Results**\n\n"
-        result_msg += f"✅ Successful: {successful_deals}\n"
-        result_msg += f"❌ Failed: {len(failed_deals)}\n"
-        
-        if failed_deals:
-            result_msg += f"\n**Failed deals:**\n"
-            for fail in failed_deals[:10]:
-                result_msg += f"• {fail}\n"
-            
-            if len(failed_deals) > 10:
-                result_msg += f"... and {len(failed_deals) - 10} more\n"
-        
-        await processing_msg.edit_text(result_msg)
-        
-        user_state.pop(message.from_user.id, None)
-        
-        log_activity(user, "BULK_DEAL_REQUEST", {
-            "successful": successful_deals,
-            "failed": len(failed_deals)
-        })
-        
-    except Exception as e:
-        logger.error(f"❌ Error in handle_bulk_deal_requests: {e}")
-        await processing_msg.edit_text(f"❌ Failed to process bulk deal requests: {str(e)}")
-
-async def handle_admin_deal_approvals(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str, processing_msg: types.Message):
-    """Handle admin deal approval Excel"""
-    try:
-        required_cols = ["Deal ID", "Admin Action (YES/NO)"]
-        for col in required_cols:
-            if col not in df.columns:
-                await processing_msg.edit_text(f"❌ Missing column: {col}")
-                return
-        
-        processed = 0
-        for _, row in df.iterrows():
-            if pd.isna(row["Deal ID"]):
-                continue
-            
-            deal_id = str(row["Deal ID"]).strip()
-            action = str(row["Admin Action (YES/NO)"]).strip().upper()
-            
-            if action not in ["YES", "NO"]:
-                continue
-            
-            try:
-                if not s3:
-                    continue
-                    
-                deal_key = f"{DEALS_FOLDER}{deal_id}.json"
-                deal_data = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=deal_key)
-                deal = json.loads(deal_data["Body"].read())
-                
-                if deal.get("final_status") in ["COMPLETED", "CLOSED"]:
-                    continue
-                
-                if action == "YES":
-                    deal["admin_action"] = "APPROVED"
-                    deal["final_status"] = "COMPLETED"
-                    
-                    remove_stone_from_supplier_and_combined(deal["stone_id"])
-                    
-                    save_notification(
-                        deal["client_username"],
-                        "client",
-                        f"✅ Deal {deal_id} approved for Stone {deal['stone_id']}"
-                    )
-                    
-                    save_notification(
-                        deal["supplier_username"],
-                        "supplier",
-                        f"✅ Deal {deal_id} approved. Please deliver Stone {deal['stone_id']}"
-                    )
-                    
-                else:
-                    deal["admin_action"] = "REJECTED"
-                    deal["final_status"] = "CLOSED"
-                    
-                    unlock_stone(deal["stone_id"])
-                    
-                    save_notification(
-                        deal["client_username"],
-                        "client",
-                        f"❌ Deal {deal_id} rejected for Stone {deal['stone_id']}"
-                    )
-                
-                s3.put_object(
-                    Bucket=CONFIG["AWS_BUCKET"],
-                    Key=deal_key,
-                    Body=json.dumps(deal, indent=2),
-                    ContentType="application/json"
-                )
-                
-                log_deal_history(deal)
-                processed += 1
-                
-            except Exception as e:
-                logger.error(f"Failed to process deal {deal_id}: {e}")
-                continue
-        
-        await processing_msg.edit_text(f"✅ Processed {processed} deal approvals.")
-        log_activity(user, "PROCESS_DEAL_APPROVALS", {"count": processed})
-        
-    except Exception as e:
-        logger.error(f"❌ Error in handle_admin_deal_approvals: {e}")
-        await processing_msg.edit_text(f"❌ Failed to process deal approvals: {str(e)}")
-
-async def handle_supplier_deal_responses(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str, processing_msg: types.Message):
-    """Handle supplier deal response Excel"""
-    try:
-        if "Deal ID" not in df.columns or "Supplier Action (ACCEPT/REJECT)" not in df.columns:
-            await processing_msg.edit_text("❌ Invalid format. Need 'Deal ID' and 'Supplier Action (ACCEPT/REJECT)' columns.")
-            return
-        
-        processed = 0
-        for _, row in df.iterrows():
-            if pd.isna(row["Deal ID"]):
-                continue
-            
-            deal_id = str(row["Deal ID"]).strip()
-            action = str(row["Supplier Action (ACCEPT/REJECT)"]).strip().upper()
-            
-            if action not in ["ACCEPT", "REJECT"]:
-                continue
-            
-            try:
-                if not s3:
-                    continue
-                    
-                deal_key = f"{DEALS_FOLDER}{deal_id}.json"
-                deal_data = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=deal_key)
-                deal = json.loads(deal_data["Body"].read())
-                
-                if deal.get("supplier_username", "").lower() != user["USERNAME"].lower():
-                    continue
-                
-                if deal.get("final_status") in ["COMPLETED", "CLOSED"]:
-                    continue
-                
-                if action == "ACCEPT":
-                    deal["supplier_action"] = "ACCEPTED"
-                    deal["admin_action"] = "PENDING"
-                    
-                    save_notification(
-                        deal["client_username"],
-                        "client",
-                        f"✅ Supplier accepted deal {deal_id} for Stone {deal['stone_id']}"
-                    )
-                    
-                    admin_df = load_accounts()
-                    admins = admin_df[admin_df["ROLE"].str.lower() == "admin"]["USERNAME"].tolist()
-                    for admin in admins:
-                        save_notification(
-                            admin,
-                            "admin",
-                            f"📝 Deal {deal_id} awaiting admin approval"
-                        )
-                        
-                else:
-                    deal["supplier_action"] = "REJECTED"
-                    deal["admin_action"] = "REJECTED"
-                    deal["final_status"] = "CLOSED"
-                    
-                    unlock_stone(deal["stone_id"])
-                    
-                    save_notification(
-                        deal["client_username"],
-                        "client",
-                        f"❌ Supplier rejected deal {deal_id} for Stone {deal['stone_id']}"
-                    )
-                
-                s3.put_object(
-                    Bucket=CONFIG["AWS_BUCKET"],
-                    Key=deal_key,
-                    Body=json.dumps(deal, indent=2),
-                    ContentType="application/json"
-                )
-                
-                log_deal_history(deal)
-                processed += 1
-                
-            except Exception as e:
-                logger.error(f"Failed to process deal {deal_id}: {e}")
-                continue
-        
-        await processing_msg.edit_text(f"✅ Processed {processed} deal responses.")
-        log_activity(user, "PROCESS_DEAL_RESPONSES", {"count": processed})
-        
-    except Exception as e:
-        logger.error(f"❌ Error in handle_supplier_deal_responses: {e}")
-        await processing_msg.edit_text(f"❌ Failed to process deal responses: {str(e)}")
-
-# -------- MAIN ENTRY POINT --------
+# ============= MAIN ENTRY POINT =============
 if __name__ == "__main__":
     logger.info(f"🚀 Starting Diamond Trading Bot v1.0")
     logger.info(f"📊 Python: 3.11.0")
@@ -3609,43 +3192,33 @@ if __name__ == "__main__":
     logger.info(f"🔗 Webhook URL: {CONFIG['WEBHOOK_URL']}")
     logger.info(f"🤖 Bot Token: {'Set' if CONFIG['BOT_TOKEN'] else 'Not Set'}")
     logger.info(f"📦 S3 Bucket: {CONFIG['AWS_BUCKET']}")
+    logger.info(f"🚀 Fly.io URL: {FLY_APP_URL}")
     
-    # Check if all required environment variables are set
     required_vars = ["BOT_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_BUCKET"]
     missing_vars = [var for var in required_vars if not os.getenv(var)]
     
     if missing_vars:
         logger.error(f"❌ Missing required environment variables: {missing_vars}")
-        logger.error("Please set these in your Render environment variables.")
     else:
         logger.info("✅ All required environment variables are set")
     
-    # Preload data for faster startup
     preload_data()
     
-    # Register cleanup function
-    atexit.register(lambda: logger.info("👋 Bot shutting down"))
-    
-    # IMPORTANT: Setup instructions for 24/7 operation
     logger.info("\n" + "="*80)
-    logger.info("🔄 FOR 24/7 OPERATION:")
+    logger.info("🚀 FLY.IO DEPLOYMENT READY")
     logger.info("="*80)
-    logger.info("✅ INTERNAL: Keep-alive pinger started (pings every 5 minutes)")
-    logger.info("📋 EXTERNAL: Set up uptime monitoring:")
-    logger.info("   1. Go to https://uptimerobot.com/")
-    logger.info("   2. Create free account")
-    logger.info("   3. Add new monitor:")
-    logger.info("      - Monitor Type: HTTP(s)")
-    logger.info("      - Friendly Name: Diamond Trading Bot")
-    logger.info("      - URL: https://telegram-bot-6iil.onrender.com/keep-alive")
-    logger.info("      - Monitoring Interval: 5 minutes")
+    logger.info(f"📱 Your bot URL: {FLY_APP_URL}")
+    logger.info(f"🔗 Health Check: {FLY_APP_URL}/health")
+    logger.info(f"🔗 Keep-Alive: {FLY_APP_URL}/keep-alive")
+    logger.info(f"🔗 Status: {FLY_APP_URL}/status")
     logger.info("="*80)
-    logger.info("📞 Monitoring URLs:")
-    logger.info(f"   • Health Check: {CONFIG['RENDER_EXTERNAL_URL']}/health")
-    logger.info(f"   • Keep-Alive: {CONFIG['RENDER_EXTERNAL_URL']}/keep-alive")
-    logger.info(f"   • Status: {CONFIG['RENDER_EXTERNAL_URL']}/status")
-    logger.info(f"   • Debug: {CONFIG['RENDER_EXTERNAL_URL']}/debug")
+    logger.info("📋 To set up uptime monitoring:")
+    logger.info("1. Go to https://uptimerobot.com")
+    logger.info(f"2. Monitor URL: {FLY_APP_URL}/keep-alive")
+    logger.info("3. Interval: 5 minutes")
     logger.info("="*80 + "\n")
+    
+    atexit.register(lambda: logger.info("👋 Bot shutting down"))
     
     import uvicorn
     uvicorn.run(
@@ -3653,4 +3226,4 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=CONFIG["PORT"],
         log_level="info"
-    )
+)
