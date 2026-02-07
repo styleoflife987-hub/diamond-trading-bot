@@ -60,7 +60,7 @@ def load_env_config():
         "RATE_LIMIT_WINDOW": int(os.getenv("RATE_LIMIT_WINDOW", "10")),
         "WEBHOOK_URL": os.getenv("WEBHOOK_URL", ""),
         "TEST_CHAT_ID": os.getenv("TEST_CHAT_ID", ""),
-        "RENDER_EXTERNAL_URL": os.getenv("RENDER_EXTERNAL_URL", "https://telegram-bot-6iil.onrender.com"),
+        "RENDER_EXTERNAL_URL": os.getenv("RENDER_EXTERNAL_URL", "https://telegram-bot-fill.onrender.com"),
     }
     
     # Validate required configurations
