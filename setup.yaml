@@ -1,35 +1,101 @@
 AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS CloudFormation template for Diamond Trading Bot resources
+
+Parameters:
+  AppName:
+    Type: String
+    Default: diamond-trading-bot
+    Description: Name of your application
+  Environment:
+    Type: String
+    Default: production
+    Description: Deployment environment (production/staging/development)
+
 Resources:
   DiamondBotBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub "diamond-bot-${AWS::AccountId}"
+      BucketName: !Sub "${AppName}-${Environment}-${AWS::AccountId}"
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: CleanupOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
       PublicAccessBlockConfiguration:
-        BlockPublicAcls: false
-        BlockPublicPolicy: false
-        IgnorePublicAcls: false
-        RestrictPublicBuckets: false
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - "*"
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+              - DELETE
+              - HEAD
+            AllowedHeaders:
+              - "*"
+            MaxAge: 3000
 
   DiamondBotUser:
     Type: AWS::IAM::User
     Properties:
-      UserName: telegram-bot-user
+      UserName: !Sub "${AppName}-${Environment}-user"
+      Tags:
+        - Key: Application
+          Value: !Ref AppName
+        - Key: Environment
+          Value: !Ref Environment
 
   DiamondBotPolicy:
     Type: AWS::IAM::Policy
     Properties:
-      PolicyName: TelegramBotS3Access
+      PolicyName: !Sub "${AppName}-${Environment}-s3-access"
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
             Action:
+              - s3:ListBucket
+            Resource: !Sub "arn:aws:s3:::${DiamondBotBucket}"
+          - Effect: Allow
+            Action:
               - s3:PutObject
               - s3:GetObject
               - s3:DeleteObject
-              - s3:ListBucket
-            Resource:
-              - !Sub "arn:aws:s3:::diamond-bot-${AWS::AccountId}"
-              - !Sub "arn:aws:s3:::diamond-bot-${AWS::AccountId}/*"
+              - s3:PutObjectAcl
+            Resource: !Sub "arn:aws:s3:::${DiamondBotBucket}/*"
       Users:
         - !Ref DiamondBotUser
+
+  DiamondBotAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref DiamondBotUser
+
+Outputs:
+  S3BucketName:
+    Description: S3 Bucket Name
+    Value: !Ref DiamondBotBucket
+    Export:
+      Name: !Sub "${AppName}-${Environment}-BucketName"
+  IAMUserName:
+    Description: IAM User Name
+    Value: !Ref DiamondBotUser
+    Export:
+      Name: !Sub "${AppName}-${Environment}-UserName"
+  AccessKeyId:
+    Description: AWS Access Key ID
+    Value: !Ref DiamondBotAccessKey
+    Export:
+      Name: !Sub "${AppName}-${Environment}-AccessKeyId"
+  SecretAccessKey:
+    Description: AWS Secret Access Key
+    Value: !GetAtt DiamondBotAccessKey.SecretAccessKey
+    Export:
+      Name: !Sub "${AppName}-${Environment}-SecretAccessKey"
