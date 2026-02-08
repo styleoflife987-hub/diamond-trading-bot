@@ -1,3 +1,4 @@
+# ✅ Tested versions that work together
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 aiogram==3.0.0b7
@@ -7,3 +8,4 @@ openpyxl==3.1.2
 pytz==2023.3
 python-multipart==0.0.6
 httpx==0.25.2
+typing-extensions==4.8.0
