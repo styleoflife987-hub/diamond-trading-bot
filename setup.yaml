@@ -1,101 +1,154 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: AWS CloudFormation template for Diamond Trading Bot resources
+Description: Creates AWS resources for Diamond Trading Bot (Render + GitHub + AWS only)
 
 Parameters:
-  AppName:
-    Type: String
-    Default: diamond-trading-bot
-    Description: Name of your application
   Environment:
     Type: String
     Default: production
-    Description: Deployment environment (production/staging/development)
+    AllowedValues:
+      - production
+      - staging
+      - development
+    Description: Deployment environment
 
 Resources:
+  # S3 Bucket for storing bot data
   DiamondBotBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub "${AppName}-${Environment}-${AWS::AccountId}"
+      BucketName: !Sub "diamond-trading-bot-${Environment}-${AWS::AccountId}"
       VersioningConfiguration:
         Status: Enabled
       LifecycleConfiguration:
         Rules:
+          - Id: CleanupTempFiles
+            Status: Enabled
+            Prefix: tmp/
+            ExpirationInDays: 1
           - Id: CleanupOldVersions
             Status: Enabled
-            NoncurrentVersionExpirationInDays: 30
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-      CorsConfiguration:
-        CorsRules:
-          - AllowedOrigins:
-              - "*"
-            AllowedMethods:
-              - GET
-              - PUT
-              - POST
-              - DELETE
-              - HEAD
-            AllowedHeaders:
-              - "*"
-            MaxAge: 3000
+            NoncurrentVersionExpirationInDays: 7
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Application
+          Value: diamond-trading-bot
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
 
+  # IAM User for the bot with limited permissions
   DiamondBotUser:
     Type: AWS::IAM::User
     Properties:
-      UserName: !Sub "${AppName}-${Environment}-user"
+      UserName: !Sub "diamond-bot-${Environment}-user"
+      Path: "/diamond-bot/"
       Tags:
         - Key: Application
-          Value: !Ref AppName
+          Value: diamond-trading-bot
         - Key: Environment
           Value: !Ref Environment
 
+  # IAM Policy with minimal required permissions
   DiamondBotPolicy:
     Type: AWS::IAM::Policy
     Properties:
-      PolicyName: !Sub "${AppName}-${Environment}-s3-access"
+      PolicyName: !Sub "diamond-bot-${Environment}-s3-access"
       PolicyDocument:
         Version: '2012-10-17'
         Statement:
-          - Effect: Allow
+          # Allow listing the bucket
+          - Sid: ListBucket
+            Effect: Allow
             Action:
               - s3:ListBucket
             Resource: !Sub "arn:aws:s3:::${DiamondBotBucket}"
-          - Effect: Allow
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - users/*
+                  - stock/*
+                  - deals/*
+                  - activity_logs/*
+                  - notifications/*
+                  - sessions/*
+          
+          # Allow read/write access to specific folders
+          - Sid: ReadWriteObjects
+            Effect: Allow
             Action:
-              - s3:PutObject
               - s3:GetObject
+              - s3:PutObject
               - s3:DeleteObject
-              - s3:PutObjectAcl
-            Resource: !Sub "arn:aws:s3:::${DiamondBotBucket}/*"
+            Resource:
+              - !Sub "arn:aws:s3:::${DiamondBotBucket}/users/*"
+              - !Sub "arn:aws:s3:::${DiamondBotBucket}/stock/*"
+              - !Sub "arn:aws:s3:::${DiamondBotBucket}/deals/*"
+              - !Sub "arn:aws:s3:::${DiamondBotBucket}/activity_logs/*"
+              - !Sub "arn:aws:s3:::${DiamondBotBucket}/notifications/*"
+              - !Sub "arn:aws:s3:::${DiamondBotBucket}/sessions/*"
+              - !Sub "arn:aws:s3:::${DiamondBotBucket}/tmp/*"
+          
+          # Allow bucket-level operations needed for the bot
+          - Sid: BucketOperations
+            Effect: Allow
+            Action:
+              - s3:GetBucketLocation
+              - s3:GetBucketCORS
+            Resource: !Sub "arn:aws:s3:::${DiamondBotBucket}"
       Users:
         - !Ref DiamondBotUser
 
+  # Access Key for the IAM User
   DiamondBotAccessKey:
     Type: AWS::IAM::AccessKey
     Properties:
       UserName: !Ref DiamondBotUser
+      Status: Active
 
 Outputs:
   S3BucketName:
-    Description: S3 Bucket Name
+    Description: S3 Bucket Name for Diamond Trading Bot
     Value: !Ref DiamondBotBucket
     Export:
-      Name: !Sub "${AppName}-${Environment}-BucketName"
+      Name: !Sub "diamond-bot-${Environment}-bucket-name"
+  
   IAMUserName:
-    Description: IAM User Name
+    Description: IAM User Name for the bot
     Value: !Ref DiamondBotUser
     Export:
-      Name: !Sub "${AppName}-${Environment}-UserName"
+      Name: !Sub "diamond-bot-${Environment}-user-name"
+  
   AccessKeyId:
-    Description: AWS Access Key ID
+    Description: AWS Access Key ID (save this!)
     Value: !Ref DiamondBotAccessKey
     Export:
-      Name: !Sub "${AppName}-${Environment}-AccessKeyId"
+      Name: !Sub "diamond-bot-${Environment}-access-key-id"
+  
   SecretAccessKey:
-    Description: AWS Secret Access Key
+    Description: AWS Secret Access Key (save this - only shown once!)
     Value: !GetAtt DiamondBotAccessKey.SecretAccessKey
     Export:
-      Name: !Sub "${AppName}-${Environment}-SecretAccessKey"
+      Name: !Sub "diamond-bot-${Environment}-secret-access-key"
+  
+  ConfigurationInstructions:
+    Description: Next steps to configure your bot
+    Value: |
+      ✅ AWS resources created successfully!
+      
+      NEXT STEPS:
+      1. Save these credentials securely:
+         - Access Key ID: !Ref DiamondBotAccessKey
+         - Secret Access Key: (check CloudFormation outputs)
+         - S3 Bucket: !Ref DiamondBotBucket
+      
+      2. Deploy to Render:
+         - Push code to GitHub
+         - Connect repo to Render
+         - Set environment variables in Render dashboard
+      
+      3. Set up webhook:
+         - After deployment, run: python update_webhook.py
