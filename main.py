@@ -1,6 +1,6 @@
 """
 Diamond Trading Bot - Complete Version
-Generic deployment ready (Fly.io removed)
+Fixed for Render deployment
 """
 
 import asyncio
@@ -119,6 +119,19 @@ startup_cache = {
 try:
     s3 = boto3.client("s3", **{k: v for k, v in AWS_CONFIG.items() if v})
     logger.info("✅ AWS S3 client initialized")
+    
+    # Test bucket access WITHOUT creating it
+    try:
+        s3.head_bucket(Bucket=CONFIG["AWS_BUCKET"])
+        logger.info(f"✅ Bucket '{CONFIG['AWS_BUCKET']}' is accessible")
+    except Exception as e:
+        logger.error(f"❌ Cannot access bucket '{CONFIG['AWS_BUCKET']}': {e}")
+        logger.error("Please ensure:")
+        logger.error("1. The bucket exists in AWS S3 Console")
+        logger.error("2. IAM user has ListBucket, GetObject, PutObject permissions")
+        logger.error("3. Bucket name is correct")
+        # Don't exit - continue with limited functionality
+        s3 = None
 except Exception as e:
     logger.error(f"❌ Failed to initialize S3 client: {e}")
     s3 = None
@@ -311,16 +324,22 @@ def load_accounts(cached=True) -> pd.DataFrame:
             return startup_cache["accounts"]
             
         if not s3:
+            logger.warning("⚠️ S3 client not available for loading accounts")
             return pd.DataFrame(columns=["USERNAME", "PASSWORD", "ROLE", "APPROVED"])
             
         local_path = "/tmp/accounts.xlsx"
-        s3.download_file(CONFIG["AWS_BUCKET"], ACCOUNTS_KEY, local_path)
-        df = pd.read_excel(local_path, dtype=str)
-        
+        try:
+            s3.download_file(CONFIG["AWS_BUCKET"], ACCOUNTS_KEY, local_path)
+            df = pd.read_excel(local_path, dtype=str)
+        except Exception as e:
+            logger.warning(f"⚠️ No accounts file found, creating empty: {e}")
+            df = pd.DataFrame(columns=["USERNAME", "PASSWORD", "ROLE", "APPROVED"])
+            
         required_cols = ["USERNAME", "PASSWORD", "ROLE", "APPROVED"]
         for col in required_cols:
             if col not in df.columns:
-                raise ValueError(f"Missing required column: {col}")
+                logger.warning(f"⚠️ Adding missing column: {col}")
+                df[col] = ""
             
             df[col] = df[col].fillna("").astype(str).apply(clean_text)
         
@@ -368,6 +387,7 @@ def load_stock(cached=True) -> pd.DataFrame:
             return startup_cache["stock"]
             
         if not s3:
+            logger.warning("⚠️ S3 client not available for loading stock")
             return pd.DataFrame()
             
         local_path = "/tmp/all_suppliers_stock.xlsx"
@@ -2367,6 +2387,10 @@ async def supplier_leaderboard(message: types.Message, user: Dict):
 async def user_activity_report(message: types.Message, user: Dict):
     """Admin: Generate activity report"""
     try:
+        if not s3:
+            await message.reply("❌ AWS S3 not available.")
+            return
+            
         objs = s3.list_objects_v2(
             Bucket=CONFIG["AWS_BUCKET"],
             Prefix=ACTIVITY_LOG_FOLDER
@@ -3182,9 +3206,15 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
 
 # ============= MAIN ENTRY POINT =============
 if __name__ == "__main__":
+    import os
+    import uvicorn
+    
+    # Get port from environment variable or use default
+    port = int(os.environ.get("PORT", 8000))
+    
     logger.info(f"🚀 Starting Diamond Trading Bot v1.0")
     logger.info(f"📊 Python: 3.11.0")
-    logger.info(f"🌐 Port: {CONFIG['PORT']}")
+    logger.info(f"🌐 Port: {port}")
     logger.info(f"🔗 Webhook URL: {CONFIG['WEBHOOK_URL'] or 'Not set (polling mode)'}")
     logger.info(f"🤖 Bot Token: {'Set' if CONFIG['BOT_TOKEN'] else 'Not Set'}")
     logger.info(f"📦 S3 Bucket: {CONFIG['AWS_BUCKET']}")
@@ -3199,10 +3229,9 @@ if __name__ == "__main__":
     
     atexit.register(lambda: logger.info("👋 Bot shutting down"))
     
-    import uvicorn
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=CONFIG["PORT"],
+        port=port,
         log_level="info"
     )
