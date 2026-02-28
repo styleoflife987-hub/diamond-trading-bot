@@ -19,7 +19,7 @@ from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Response
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List, Tuple
 import logging
@@ -57,7 +57,7 @@ def load_env_config():
         "AWS_ACCESS_KEY_ID": os.getenv("AWS_ACCESS_KEY_ID"),
         "AWS_SECRET_ACCESS_KEY": os.getenv("AWS_SECRET_ACCESS_KEY"),
         "AWS_REGION": os.getenv("AWS_REGION", "ap-south-1"),
-        "AWS_BUCKET": os.getenv("AWS_BUCKET", "diamond-bucket-styleoflifes"),
+        "AWS_BUCKET": os.getenv("AWS_BUCKET", "diamond-bucket-styleoflife987"),
         "PORT": int(os.getenv("PORT", "10000")),
         "PYTHON_VERSION": os.getenv("PYTHON_VERSION", "3.11.0"),
         "SESSION_TIMEOUT": int(os.getenv("SESSION_TIMEOUT", "3600")),
@@ -1180,9 +1180,11 @@ async def lifespan(app: FastAPI):
 # -------- FASTAPI APP --------
 app = FastAPI(title="Diamond Trading Bot", lifespan=lifespan)
 
-# -------- HEALTH CHECK ENDPOINTS --------
+# -------- HEALTH CHECK ENDPOINTS WITH HEAD SUPPORT --------
 @app.get("/")
+@app.head("/")  # Add HEAD support
 async def root():
+    """Root endpoint with HEAD support"""
     return {
         "status": "online",
         "service": "Diamond Trading Bot",
@@ -1197,6 +1199,7 @@ async def root():
     }
 
 @app.get("/health")
+@app.head("/health")  # Add HEAD support for UptimeRobot
 async def health_check():
     """Health check endpoint for Render monitoring and keep-alive"""
     status = "healthy" if BOT_STARTED else "starting"
@@ -1224,6 +1227,7 @@ async def health_check():
     }
 
 @app.get("/health/detailed")
+@app.head("/health/detailed")  # Add HEAD support
 async def detailed_health():
     """Comprehensive health check for monitoring"""
     health_status = {
@@ -1266,6 +1270,7 @@ async def detailed_health():
     return health_status
 
 @app.get("/ping")
+@app.head("/ping")  # Add HEAD support
 async def ping():
     """Simple ping endpoint for keep-alive"""
     return {
@@ -1278,6 +1283,7 @@ async def ping():
     }
 
 @app.get("/status")
+@app.head("/status")  # Add HEAD support
 async def status_check():
     """Comprehensive status check"""
     status = {
@@ -1323,6 +1329,14 @@ async def status_check():
     
     return status
 
+# -------- CATCH-ALL HEAD HANDLER --------
+@app.head("/{full_path:path}")
+async def catch_all_head(full_path: str):
+    """Catch-all HEAD handler for any path - ensures UptimeRobot never gets 405"""
+    logger.debug(f"HEAD request received for path: /{full_path}")
+    return Response(status_code=200)
+
+# -------- OTHER ENDPOINTS (Keep existing GET endpoints) --------
 @app.get("/sessions")
 async def get_sessions():
     """Admin endpoint to view active sessions"""
