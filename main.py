@@ -2234,28 +2234,35 @@ async def handle_all_messages(message: types.Message):
             if text in menu_buttons:
                 await handle_logged_in_buttons(message, user)
             else:
-                # If it's not a menu button but user is logged in, show appropriate menu
+                # If it's not a menu button but user is logged in, just ignore or show appropriate response
+                # But don't show "Please use menu buttons" message unnecessarily
                 role = user.get("ROLE", "").lower()
                 if role == "supplier":
-                    await message.reply(
-                        "Please use the menu buttons below to navigate:",
-                        reply_markup=supplier_kb
-                    )
+                    # Only show this if it's not a command and not empty
+                    if text and not text.startswith('/'):
+                        await message.reply(
+                            "Please use the menu buttons below to navigate:",
+                            reply_markup=supplier_kb
+                        )
                 elif role == "admin":
-                    await message.reply(
-                        "Please use the menu buttons below to navigate:",
-                        reply_markup=admin_kb
-                    )
+                    if text and not text.startswith('/'):
+                        await message.reply(
+                            "Please use the menu buttons below to navigate:",
+                            reply_markup=admin_kb
+                        )
                 elif role == "client":
-                    await message.reply(
-                        "Please use the menu buttons below to navigate:",
-                        reply_markup=client_kb
-                    )
+                    if text and not text.startswith('/'):
+                        await message.reply(
+                            "Please use the menu buttons below to navigate:",
+                            reply_markup=client_kb
+                        )
         else:
-            await message.reply(
-                "🔒 Please login first using /login\n"
-                "Or create an account using /createaccount"
-            )
+            # Only show login message if it's not a command
+            if text and not text.startswith('/'):
+                await message.reply(
+                    "🔒 Please login first using /login\n"
+                    "Or create an account using /createaccount"
+                )
             
     except Exception as e:
         logger.error(f"❌ Error in handle_all_messages: {e}", exc_info=True)
@@ -2591,7 +2598,7 @@ async def view_all_stock(message: types.Message, user: Dict):
         for shape, count in shape_counts.items():
             summary += f"• {shape}: {count}\n"
         
-        await message.reply(summary, parse_mode=ParseMode.MARKDOWN)
+        await message.reply(summary, parse_mode=ParseMode.MARKDOWN, reply_markup=admin_kb)
         
         with TempFileManager(suffix=".xlsx") as excel_path:
             df.to_excel(excel_path, index=False)
@@ -2632,7 +2639,7 @@ async def view_users(message: types.Message, user: Dict):
         for status, count in approval_stats.items():
             stats_msg += f"• {status}: {count}\n"
         
-        await message.reply(stats_msg, parse_mode=ParseMode.MARKDOWN)
+        await message.reply(stats_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=admin_kb)
         
         with TempFileManager(suffix=".xlsx") as excel_path:
             df.to_excel(excel_path, index=False)
@@ -2709,7 +2716,7 @@ async def supplier_leaderboard(message: types.Message, user: Dict):
                 f"   🏦 Total Value: ${stats['Total_Value']:,.2f}\n\n"
             )
         
-        await message.reply(leaderboard_msg, parse_mode=ParseMode.MARKDOWN)
+        await message.reply(leaderboard_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=admin_kb)
         
         with TempFileManager(suffix=".xlsx") as excel_path:
             supplier_stats.to_excel(excel_path)
@@ -2785,7 +2792,8 @@ async def upload_excel_prompt(message: types.Message, user: Dict):
             "• Format: .xlsx or .xls\n"
             "• No duplicate Stock #\n\n"
             "Send your file now or use '📥 Download Sample Excel' first.",
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=supplier_kb
         )
         
         log_activity(user, "UPLOAD_PROMPT")
@@ -2835,7 +2843,7 @@ async def supplier_my_stock(message: types.Message, user: Dict):
                         for shape, count in shape_counts.items():
                             stats_msg += f"• {shape}: {count}\n"
                 
-                await message.reply(stats_msg, parse_mode=ParseMode.MARKDOWN)
+                await message.reply(stats_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=supplier_kb)
                 
                 await message.reply_document(
                     types.FSInputFile(local_path),
@@ -2925,7 +2933,7 @@ async def supplier_analytics(message: types.Message, user: Dict):
         else:
             summary_msg += "• Prices are well balanced with market\n"
         
-        await message.reply(summary_msg, parse_mode=ParseMode.MARKDOWN)
+        await message.reply(summary_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=supplier_kb)
         
         with TempFileManager(suffix=".xlsx") as excel_path:
             results_df.to_excel(excel_path, index=False)
@@ -3010,7 +3018,8 @@ async def download_sample_excel(message: types.Message, user: Dict):
                 "• Stock # must be unique\n"
                 "• Remove sample rows before uploading\n"
                 "• Optional columns (CUT, Polish, Symmetry) can be left blank"
-            )
+            ),
+            reply_markup=supplier_kb
         )
         
         log_activity(user, "DOWNLOAD_SAMPLE_EXCEL")
@@ -3083,7 +3092,7 @@ async def smart_deals(message: types.Message, user: Dict):
                 f"   🔒 Status: {deal.get('LOCKED', 'NO')}\n\n"
             )
         
-        await message.reply(deals_msg, parse_mode=ParseMode.MARKDOWN)
+        await message.reply(deals_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=client_kb)
         
         if len(good_deals) > 5:
             with TempFileManager(suffix=".xlsx") as excel_path:
@@ -3135,7 +3144,8 @@ async def request_deal_start(message: types.Message, user: Dict):
                         "• Leave blank to skip\n"
                         "• Prices should be $ per carat\n"
                         "• Remove example rows if not needed"
-                    )
+                    ),
+                    reply_markup=client_kb
                 )
             
             user_state[message.from_user.id] = {
@@ -3168,7 +3178,7 @@ async def request_deal_start(message: types.Message, user: Dict):
             
             stones_msg += "Enter the **Stock #** of the stone you want to make an offer on:"
             
-            await message.reply(stones_msg, parse_mode=ParseMode.MARKDOWN)
+            await message.reply(stones_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=client_kb)
         
         log_activity(user, "START_DEAL_REQUEST")
         
@@ -3228,21 +3238,21 @@ async def view_deals(message: types.Message, user: Dict):
         if user_role == "admin":
             filtered_deals = deals
             title = "All Deals"
-            
+            kb = admin_kb
         elif user_role == "supplier":
             filtered_deals = [
                 d for d in deals 
                 if d.get("supplier_username", "").lower() == username
             ]
             title = "Your Deals"
-            
+            kb = supplier_kb
         elif user_role == "client":
             filtered_deals = [
                 d for d in deals 
                 if d.get("client_username", "").lower() == username
             ]
             title = "Your Deal Requests"
-            
+            kb = client_kb
         else:
             await message.reply("❌ Unauthorized access.")
             return
@@ -3262,7 +3272,7 @@ async def view_deals(message: types.Message, user: Dict):
         for status, count in status_counts.items():
             summary_msg += f"• {status}: {count}\n"
         
-        await message.reply(summary_msg, parse_mode=ParseMode.MARKDOWN)
+        await message.reply(summary_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
         
         excel_data = []
         for deal in filtered_deals:
@@ -3495,7 +3505,7 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
                 for warning in warnings[:3]:
                     error_msg += f"⚠️ {warning}\n"
             
-            await message.reply(error_msg, parse_mode=ParseMode.MARKDOWN)
+            await message.reply(error_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=supplier_kb)
             return
         
         # Save to S3
@@ -3518,28 +3528,19 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
         total_carats = cleaned_df["Weight"].sum() if "Weight" in cleaned_df.columns else 0
         total_value = (cleaned_df["Weight"] * cleaned_df["Price Per Carat"]).sum() if "Weight" in cleaned_df.columns and "Price Per Carat" in cleaned_df.columns else 0
         
-        # Get appropriate keyboard based on role
-        role = user.get("ROLE", "").lower()
-        if role == "supplier":
-            kb = supplier_kb
-        elif role == "admin":
-            kb = admin_kb
-        else:
-            kb = client_kb
-        
-        # Success message with menu reminder
+        # Success message with summary
         success_msg = (
             f"✅ **Stock Upload Successful!**\n\n"
-            f"📊 **Statistics:**\n"
-            f"• 💎 Diamonds: {total_stones}\n"
+            f"📊 **Stock Summary:**\n"
+            f"• 💎 Total Diamonds: {total_stones}\n"
             f"• ⚖️ Total Carats: {total_carats:.2f}\n"
             f"• 💰 Total Value: ${total_value:,.2f}\n\n"
-            f"📈 **Price Range:**\n"
+            f"📈 **Price Statistics:**\n"
             f"• Min: ${cleaned_df['Price Per Carat'].min():,.0f}/ct\n"
             f"• Avg: ${cleaned_df['Price Per Carat'].mean():,.0f}/ct\n"
             f"• Max: ${cleaned_df['Price Per Carat'].max():,.0f}/ct\n\n"
-            f"🔄 Combined stock has been updated.\n\n"
-            f"📌 **Use the menu buttons below to continue:**"
+            f"🔄 Your stock has been uploaded to AWS and combined inventory updated.\n\n"
+            f"📌 **What would you like to do next?**"
         )
         
         if warnings:
@@ -3547,7 +3548,7 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
             for warning in warnings[:3]:
                 success_msg += f"⚠️ {warning}\n"
         
-        await message.reply(success_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+        await message.reply(success_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=supplier_kb)
         
         log_activity(user, "UPLOAD_STOCK", {
             "stones": total_stones,
@@ -3558,7 +3559,7 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
             
     except Exception as e:
         logger.error(f"❌ Error in handle_supplier_stock_upload: {e}")
-        await message.reply("❌ Failed to upload stock. Please try again.")
+        await message.reply("❌ Failed to upload stock. Please try again.", reply_markup=supplier_kb)
 
 # -------- BULK DEAL HANDLERS --------
 async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str):
