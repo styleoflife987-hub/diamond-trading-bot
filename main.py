@@ -2,6 +2,17 @@ import asyncio
 import pandas as pd
 import boto3
 import re
+import tempfile
+import os
+import json
+import pytz
+import uuid
+import time
+import unicodedata
+import uvicorn
+import threading
+import fcntl
+import botocore
 from io import BytesIO
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F, Router
@@ -10,16 +21,10 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from contextlib import asynccontextmanager
-import os
-import json
-import pytz
-import uuid
-import time
-import unicodedata
-import uvicorn
 from typing import Optional, Dict, Any, List, Tuple
 import logging
 from fastapi.responses import JSONResponse, FileResponse
+from functools import wraps
 
 # -------- SETUP LOGGING --------
 logging.basicConfig(
@@ -44,7 +49,7 @@ STATUS_REJECTED = "REJECTED"
 STATUS_COMPLETED = "COMPLETED"
 STATUS_CLOSED = "CLOSED"
 
-# -------- CONFIGURATION --------
+# -------- CONFIGURATION WITH VALIDATION --------
 def load_env_config():
     """Load and validate all environment variables"""
     config = {
@@ -60,6 +65,7 @@ def load_env_config():
         "RATE_LIMIT_WINDOW": int(os.getenv("RATE_LIMIT_WINDOW", "10")),
         "WEBHOOK_URL": os.getenv("WEBHOOK_URL", ""),
         "TEST_CHAT_ID": os.getenv("TEST_CHAT_ID", ""),
+        "RENDER_EXTERNAL_URL": os.getenv("RENDER_EXTERNAL_URL", ""),
     }
     
     # Validate required configurations
@@ -70,9 +76,8 @@ def load_env_config():
         logger.warning("AWS credentials not fully set. Some features may not work.")
     
     # Auto-generate webhook URL if not set
-    if not config["WEBHOOK_URL"]:
-        render_url = os.getenv("RENDER_EXTERNAL_URL", "https://telegram-bot-6iil.onrender.com")
-        config["WEBHOOK_URL"] = f"{render_url}/webhook"
+    if not config["WEBHOOK_URL"] and config["RENDER_EXTERNAL_URL"]:
+        config["WEBHOOK_URL"] = f"{config['RENDER_EXTERNAL_URL']}/webhook"
         logger.info(f"Auto-generated webhook URL: {config['WEBHOOK_URL']}")
     
     logger.info(f"✅ Config loaded: BOT_TOKEN present: {bool(config['BOT_TOKEN'])}")
@@ -100,6 +105,54 @@ DEALS_FOLDER = "deals/"
 DEAL_HISTORY_KEY = "deals/deal_history.xlsx"
 NOTIFICATIONS_FOLDER = "notifications/"
 SESSION_KEY = "sessions/logged_in_users.json"
+
+# -------- DISTRIBUTED LOCK FOR STOCK UPDATES --------
+class DistributedLock:
+    """File-based distributed lock for stock operations"""
+    def __init__(self, lock_key: str):
+        self.lock_key = lock_key
+        self.lock_file = f"/tmp/lock_{lock_key.replace('/', '_')}"
+        self.fd = None
+    
+    def __enter__(self):
+        self.fd = open(self.lock_file, 'w')
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        logger.debug(f"🔒 Lock acquired: {self.lock_key}")
+        return self
+    
+    def __exit__(self, *args):
+        if self.fd:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
+            self.fd.close()
+            try:
+                os.remove(self.lock_file)
+            except:
+                pass
+            logger.debug(f"🔓 Lock released: {self.lock_key}")
+
+def atomic_stock_operation(operation_func):
+    """Decorator for atomic stock operations"""
+    @wraps(operation_func)
+    def wrapper(*args, **kwargs):
+        with DistributedLock("stock_update"):
+            return operation_func(*args, **kwargs)
+    return wrapper
+
+# -------- SAFE S3 OPERATIONS WITH RETRY --------
+def safe_s3_operation(operation, fallback=None, max_retries=3):
+    """Execute S3 operation with retries and exponential backoff"""
+    for attempt in range(max_retries):
+        try:
+            return operation()
+        except (botocore.exceptions.ClientError, 
+                botocore.exceptions.ConnectionError,
+                botocore.exceptions.EndpointConnectionError) as e:
+            logger.warning(f"S3 operation failed (attempt {attempt + 1}/{max_retries}): {e}")
+            if attempt == max_retries - 1:
+                logger.error(f"Failed after {max_retries} attempts: {e}")
+                return fallback
+            time.sleep(2 ** attempt)  # Exponential backoff: 1, 2, 4 seconds
+    return fallback
 
 # -------- INITIALIZE AWS CLIENTS --------
 try:
@@ -156,6 +209,25 @@ supplier_kb = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True
 )
+
+# -------- TEMP FILE MANAGER --------
+class TempFileManager:
+    """Context manager for temporary files"""
+    def __init__(self, suffix=None):
+        self.suffix = suffix
+        self.temp_file = None
+    
+    def __enter__(self):
+        with tempfile.NamedTemporaryFile(suffix=self.suffix, delete=False) as f:
+            self.temp_file = f.name
+            return self.temp_file
+    
+    def __exit__(self, *args):
+        if self.temp_file and os.path.exists(self.temp_file):
+            try:
+                os.remove(self.temp_file)
+            except Exception as e:
+                logger.error(f"Failed to remove temp file {self.temp_file}: {e}")
 
 # -------- TEXT CLEANING FUNCTIONS --------
 def clean_text(value: Any) -> str:
@@ -229,7 +301,7 @@ def touch_session(uid: int):
 # -------- SESSION MANAGEMENT --------
 def save_sessions():
     """Save sessions to S3"""
-    try:
+    def _save():
         if s3:
             s3.put_object(
                 Bucket=CONFIG["AWS_BUCKET"],
@@ -238,18 +310,22 @@ def save_sessions():
                 ContentType="application/json"
             )
             logger.info(f"✅ Saved {len(logged_in_users)} active sessions")
-    except Exception as e:
-        logger.error(f"❌ Failed to save sessions: {e}")
+    
+    safe_s3_operation(_save)
 
 def load_sessions():
     """Load sessions from S3"""
     global logged_in_users
     try:
         if s3:
-            obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=SESSION_KEY)
-            raw = json.loads(obj["Body"].read())
-            logged_in_users = {int(k): v for k, v in raw.items()}
-            logger.info(f"✅ Loaded {len(logged_in_users)} sessions from S3")
+            def _load():
+                obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=SESSION_KEY)
+                return json.loads(obj["Body"].read())
+            
+            raw = safe_s3_operation(_load, fallback={})
+            if raw:
+                logged_in_users = {int(k) if k.isdigit() else k: v for k, v in raw.items()}
+                logger.info(f"✅ Loaded {len(logged_in_users)} sessions from S3")
     except Exception as e:
         logger.warning(f"⚠️ No existing sessions or error loading: {e}")
         logged_in_users = {}
@@ -295,23 +371,29 @@ def load_accounts() -> pd.DataFrame:
     try:
         if not s3:
             return pd.DataFrame(columns=["USERNAME", "PASSWORD", "ROLE", "APPROVED"])
+        
+        with TempFileManager(suffix=".xlsx") as local_path:
+            def _download():
+                s3.download_file(CONFIG["AWS_BUCKET"], ACCOUNTS_KEY, local_path)
+                return True
             
-        local_path = "/tmp/accounts.xlsx"
-        s3.download_file(CONFIG["AWS_BUCKET"], ACCOUNTS_KEY, local_path)
-        df = pd.read_excel(local_path, dtype=str)
-        
-        required_cols = ["USERNAME", "PASSWORD", "ROLE", "APPROVED"]
-        for col in required_cols:
-            if col not in df.columns:
-                raise ValueError(f"Missing required column: {col}")
+            if not safe_s3_operation(_download, fallback=False):
+                return pd.DataFrame(columns=["USERNAME", "PASSWORD", "ROLE", "APPROVED"])
             
-            df[col] = df[col].fillna("").astype(str).apply(clean_text)
-        
-        df["PASSWORD"] = df["PASSWORD"].apply(clean_password)
-        
-        logger.info(f"✅ Loaded {len(df)} accounts from S3")
-        
-        return df
+            df = pd.read_excel(local_path, dtype=str)
+            
+            required_cols = ["USERNAME", "PASSWORD", "ROLE", "APPROVED"]
+            for col in required_cols:
+                if col not in df.columns:
+                    raise ValueError(f"Missing required column: {col}")
+                
+                df[col] = df[col].fillna("").astype(str).apply(clean_text)
+            
+            df["PASSWORD"] = df["PASSWORD"].apply(clean_password)
+            
+            logger.info(f"✅ Loaded {len(df)} accounts from S3")
+            
+            return df
         
     except Exception as e:
         logger.error(f"❌ Failed to load accounts: {e}")
@@ -327,28 +409,35 @@ def save_accounts(df: pd.DataFrame):
         if not s3:
             logger.error("❌ S3 client not available")
             return
+        
+        with TempFileManager(suffix=".xlsx") as local_path:
+            df.to_excel(local_path, index=False)
             
-        local_path = "/tmp/accounts.xlsx"
-        df.to_excel(local_path, index=False)
-        s3.upload_file(local_path, CONFIG["AWS_BUCKET"], ACCOUNTS_KEY)
-        logger.info(f"✅ Saved {len(df)} accounts to S3")
+            def _upload():
+                s3.upload_file(local_path, CONFIG["AWS_BUCKET"], ACCOUNTS_KEY)
+            
+            safe_s3_operation(_upload)
+            logger.info(f"✅ Saved {len(df)} accounts to S3")
     except Exception as e:
         logger.error(f"❌ Failed to save accounts: {e}")
-    finally:
-        if os.path.exists(local_path):
-            os.remove(local_path)
 
 def load_stock() -> pd.DataFrame:
     """Load combined stock from S3"""
     try:
         if not s3:
             return pd.DataFrame()
+        
+        with TempFileManager(suffix=".xlsx") as local_path:
+            def _download():
+                s3.download_file(CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY, local_path)
+                return True
             
-        local_path = "/tmp/all_suppliers_stock.xlsx"
-        s3.download_file(CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY, local_path)
-        df = pd.read_excel(local_path)
-        logger.info(f"✅ Loaded {len(df)} stock items from S3")
-        return df
+            if not safe_s3_operation(_download, fallback=False):
+                return pd.DataFrame()
+            
+            df = pd.read_excel(local_path)
+            logger.info(f"✅ Loaded {len(df)} stock items from S3")
+            return df
     except Exception as e:
         logger.warning(f"⚠️ Failed to load stock: {e}")
         return pd.DataFrame()
@@ -373,21 +462,26 @@ def log_activity(user: Dict[str, Any], action: str, details: Optional[Dict] = No
         
         key = f"{ACTIVITY_LOG_FOLDER}{log_entry['date']}/{log_entry['login_id']}.json"
         
-        try:
-            obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=key)
-            data = json.loads(obj["Body"].read())
-        except:
-            data = []
+        def _get_log():
+            try:
+                obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=key)
+                return json.loads(obj["Body"].read())
+            except:
+                return []
+        
+        data = safe_s3_operation(_get_log, fallback=[])
         
         data.append(log_entry)
         
-        s3.put_object(
-            Bucket=CONFIG["AWS_BUCKET"],
-            Key=key,
-            Body=json.dumps(data, indent=2),
-            ContentType="application/json"
-        )
+        def _save_log():
+            s3.put_object(
+                Bucket=CONFIG["AWS_BUCKET"],
+                Key=key,
+                Body=json.dumps(data, indent=2),
+                ContentType="application/json"
+            )
         
+        safe_s3_operation(_save_log)
         logger.info(f"📝 Logged activity: {user.get('USERNAME')} - {action}")
         
     except Exception as e:
@@ -398,11 +492,14 @@ def generate_activity_excel() -> Optional[str]:
     try:
         if not s3:
             return None
-            
-        objs = s3.list_objects_v2(
-            Bucket=CONFIG["AWS_BUCKET"],
-            Prefix=ACTIVITY_LOG_FOLDER
-        )
+        
+        def _list_objects():
+            return s3.list_objects_v2(
+                Bucket=CONFIG["AWS_BUCKET"],
+                Prefix=ACTIVITY_LOG_FOLDER
+            )
+        
+        objs = safe_s3_operation(_list_objects, fallback={})
 
         if "Contents" not in objs or not objs["Contents"]:
             return None
@@ -414,11 +511,16 @@ def generate_activity_excel() -> Optional[str]:
                 continue
 
             try:
-                raw = s3.get_object(
-                    Bucket=CONFIG["AWS_BUCKET"],
-                    Key=obj["Key"]
-                )["Body"].read().decode("utf-8")
-
+                def _get_object():
+                    return s3.get_object(
+                        Bucket=CONFIG["AWS_BUCKET"],
+                        Key=obj["Key"]
+                    )["Body"].read().decode("utf-8")
+                
+                raw = safe_s3_operation(_get_object, fallback="")
+                if not raw:
+                    continue
+                
                 data = json.loads(raw)
                 for entry in data:
                     rows.append({
@@ -437,11 +539,10 @@ def generate_activity_excel() -> Optional[str]:
             return None
 
         df = pd.DataFrame(rows)
-        path = "/tmp/user_activity_report.xlsx"
-        df.to_excel(path, index=False)
-        
-        logger.info(f"✅ Generated activity report with {len(rows)} entries")
-        return path
+        with TempFileManager(suffix=".xlsx") as path:
+            df.to_excel(path, index=False)
+            logger.info(f"✅ Generated activity report with {len(rows)} entries")
+            return path
 
     except Exception as e:
         logger.error(f"❌ Activity report error: {e}")
@@ -456,11 +557,14 @@ def save_notification(username: str, role: str, message: str):
             
         key = f"{NOTIFICATIONS_FOLDER}{role}_{username}.json"
         
-        try:
-            obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=key)
-            data = json.loads(obj["Body"].read())
-        except:
-            data = []
+        def _get_notifications():
+            try:
+                obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=key)
+                return json.loads(obj["Body"].read())
+            except:
+                return []
+        
+        data = safe_s3_operation(_get_notifications, fallback=[])
         
         data.append({
             "message": message,
@@ -468,12 +572,15 @@ def save_notification(username: str, role: str, message: str):
             "read": False
         })
         
-        s3.put_object(
-            Bucket=CONFIG["AWS_BUCKET"],
-            Key=key,
-            Body=json.dumps(data, indent=2),
-            ContentType="application/json"
-        )
+        def _save_notifications():
+            s3.put_object(
+                Bucket=CONFIG["AWS_BUCKET"],
+                Key=key,
+                Body=json.dumps(data, indent=2),
+                ContentType="application/json"
+            )
+        
+        safe_s3_operation(_save_notifications)
         
     except Exception as e:
         logger.error(f"❌ Failed to save notification: {e}")
@@ -485,20 +592,27 @@ def fetch_unread_notifications(username: str, role: str) -> List[Dict]:
             return []
             
         key = f"{NOTIFICATIONS_FOLDER}{role}_{username}.json"
-        obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=key)
-        data = json.loads(obj["Body"].read())
+        
+        def _get_notifications():
+            obj = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=key)
+            return json.loads(obj["Body"].read())
+        
+        data = safe_s3_operation(_get_notifications, fallback=[])
         
         unread = [n for n in data if not n.get("read")]
         
         for n in data:
             n["read"] = True
         
-        s3.put_object(
-            Bucket=CONFIG["AWS_BUCKET"],
-            Key=key,
-            Body=json.dumps(data, indent=2),
-            ContentType="application/json"
-        )
+        def _save_notifications():
+            s3.put_object(
+                Bucket=CONFIG["AWS_BUCKET"],
+                Key=key,
+                Body=json.dumps(data, indent=2),
+                ContentType="application/json"
+            )
+        
+        safe_s3_operation(_save_notifications)
         
         return unread
         
@@ -605,7 +719,6 @@ class DiamondExcelValidator:
             if 'Price Per Carat' in df.columns:
                 try:
                     df['Price Per Carat'] = pd.to_numeric(df['Price Per Carat'], errors='coerce')
-                    # FIXED: Changed "Price Per Carat" to 'Price Per Carat'
                     invalid_prices = df['Price Per Carat'].isna() | (df['Price Per Carat'] <= 0)
                     if invalid_prices.any():
                         invalid_count = invalid_prices.sum()
@@ -664,16 +777,20 @@ class DiamondExcelValidator:
             return False, pd.DataFrame(), errors, warnings
 
 # -------- STOCK MANAGEMENT --------
+@atomic_stock_operation
 def rebuild_combined_stock():
     """Rebuild combined stock from all supplier files"""
     try:
         if not s3:
             return
-            
-        objs = s3.list_objects_v2(
-            Bucket=CONFIG["AWS_BUCKET"],
-            Prefix=SUPPLIER_STOCK_FOLDER
-        )
+        
+        def _list_objects():
+            return s3.list_objects_v2(
+                Bucket=CONFIG["AWS_BUCKET"],
+                Prefix=SUPPLIER_STOCK_FOLDER
+            )
+        
+        objs = safe_s3_operation(_list_objects, fallback={})
         
         if "Contents" not in objs:
             return
@@ -686,14 +803,16 @@ def rebuild_combined_stock():
                 continue
             
             try:
-                local_path = f"/tmp/{key.split('/')[-1]}"
-                s3.download_file(CONFIG["AWS_BUCKET"], key, local_path)
-                df = pd.read_excel(local_path)
-                df["SUPPLIER"] = key.split("/")[-1].replace(".xlsx", "").lower()
-                dfs.append(df)
-                
-                if os.path.exists(local_path):
-                    os.remove(local_path)
+                with TempFileManager(suffix=".xlsx") as local_path:
+                    def _download():
+                        s3.download_file(CONFIG["AWS_BUCKET"], key, local_path)
+                    
+                    if not safe_s3_operation(_download, fallback=False):
+                        continue
+                    
+                    df = pd.read_excel(local_path)
+                    df["SUPPLIER"] = key.split("/")[-1].replace(".xlsx", "").lower()
+                    dfs.append(df)
                     
             except Exception as e:
                 logger.error(f"Failed to process {key}: {e}")
@@ -725,67 +844,82 @@ def rebuild_combined_stock():
         final_df["LOCKED"] = final_df.get("LOCKED", "NO")
         final_df = final_df[desired_columns]
         
-        local_path = "/tmp/all_suppliers_stock.xlsx"
-        final_df.to_excel(local_path, index=False)
-        s3.upload_file(local_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
+        with TempFileManager(suffix=".xlsx") as local_path:
+            final_df.to_excel(local_path, index=False)
+            
+            def _upload():
+                s3.upload_file(local_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
+            
+            safe_s3_operation(_upload)
         
         logger.info(f"✅ Rebuilt combined stock with {len(final_df)} items from {len(dfs)} suppliers")
-        
-        if os.path.exists(local_path):
-            os.remove(local_path)
             
     except Exception as e:
         logger.error(f"❌ Error rebuilding combined stock: {e}")
 
+@atomic_stock_operation
 def atomic_lock_stone(stone_id: str) -> bool:
     """Atomically lock a stone to prevent race conditions"""
     try:
         if not s3:
             return False
+        
+        with TempFileManager(suffix=".xlsx") as local_path:
+            def _download():
+                s3.download_file(CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY, local_path)
             
-        local_path = "/tmp/current_stock.xlsx"
-        s3.download_file(CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY, local_path)
-        df = pd.read_excel(local_path)
-        
-        if df.empty or "Stock #" not in df.columns or "LOCKED" not in df.columns:
-            return False
-        
-        mask = (df["Stock #"] == stone_id) & (df["LOCKED"] != "YES")
-        if not mask.any():
-            return False
-        
-        df.loc[mask, "LOCKED"] = "YES"
-        
-        for col in df.select_dtypes(include="object"):
-            df[col] = df[col].map(safe_excel)
-        
-        temp_path = "/tmp/locked_stock.xlsx"
-        df.to_excel(temp_path, index=False)
-        s3.upload_file(temp_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
-        
-        stone_row = df[df["Stock #"] == stone_id].iloc[0]
-        supplier = stone_row.get("SUPPLIER", "")
-        
-        if supplier:
-            supplier_file = f"{SUPPLIER_STOCK_FOLDER}{supplier}.xlsx"
-            try:
-                s3.download_file(CONFIG["AWS_BUCKET"], supplier_file, "/tmp/supplier_stock.xlsx")
-                supplier_df = pd.read_excel("/tmp/supplier_stock.xlsx")
-                
-                if "Stock #" in supplier_df.columns and "LOCKED" in supplier_df.columns:
-                    supplier_df.loc[supplier_df["Stock #"] == stone_id, "LOCKED"] = "YES"
-                    
-                    for col in supplier_df.select_dtypes(include="object"):
-                        supplier_df[col] = supplier_df[col].map(safe_excel)
-                    
-                    supplier_df.to_excel("/tmp/supplier_stock.xlsx", index=False)
-                    s3.upload_file("/tmp/supplier_stock.xlsx", CONFIG["AWS_BUCKET"], supplier_file)
-            except Exception as e:
-                logger.error(f"Failed to update supplier file: {e}")
-        
-        for path in [local_path, temp_path, "/tmp/supplier_stock.xlsx"]:
-            if os.path.exists(path):
-                os.remove(path)
+            if not safe_s3_operation(_download, fallback=False):
+                return False
+            
+            df = pd.read_excel(local_path)
+            
+            if df.empty or "Stock #" not in df.columns or "LOCKED" not in df.columns:
+                return False
+            
+            mask = (df["Stock #"] == stone_id) & (df["LOCKED"] != "YES")
+            if not mask.any():
+                return False
+            
+            df.loc[mask, "LOCKED"] = "YES"
+            
+            for col in df.select_dtypes(include="object"):
+                df[col] = df[col].map(safe_excel)
+            
+            df.to_excel(local_path, index=False)
+            
+            def _upload():
+                s3.upload_file(local_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
+            
+            if not safe_s3_operation(_upload, fallback=False):
+                return False
+            
+            stone_row = df[df["Stock #"] == stone_id].iloc[0]
+            supplier = stone_row.get("SUPPLIER", "")
+            
+            if supplier:
+                supplier_file = f"{SUPPLIER_STOCK_FOLDER}{supplier}.xlsx"
+                try:
+                    with TempFileManager(suffix=".xlsx") as supplier_path:
+                        def _download_supplier():
+                            s3.download_file(CONFIG["AWS_BUCKET"], supplier_file, supplier_path)
+                        
+                        if safe_s3_operation(_download_supplier, fallback=False):
+                            supplier_df = pd.read_excel(supplier_path)
+                            
+                            if "Stock #" in supplier_df.columns and "LOCKED" in supplier_df.columns:
+                                supplier_df.loc[supplier_df["Stock #"] == stone_id, "LOCKED"] = "YES"
+                                
+                                for col in supplier_df.select_dtypes(include="object"):
+                                    supplier_df[col] = supplier_df[col].map(safe_excel)
+                                
+                                supplier_df.to_excel(supplier_path, index=False)
+                                
+                                def _upload_supplier():
+                                    s3.upload_file(supplier_path, CONFIG["AWS_BUCKET"], supplier_file)
+                                
+                                safe_s3_operation(_upload_supplier)
+                except Exception as e:
+                    logger.error(f"Failed to update supplier file: {e}")
         
         logger.info(f"✅ Locked stone: {stone_id}")
         return True
@@ -794,6 +928,7 @@ def atomic_lock_stone(stone_id: str) -> bool:
         logger.error(f"❌ Atomic lock failed for stone {stone_id}: {e}")
         return False
 
+@atomic_stock_operation
 def unlock_stone(stone_id: str):
     """Unlock a stone"""
     try:
@@ -806,40 +941,48 @@ def unlock_stone(stone_id: str):
         
         df.loc[df["Stock #"] == stone_id, "LOCKED"] = "NO"
         
-        temp_path = "/tmp/all_suppliers_stock.xlsx"
-        for col in df.select_dtypes(include="object"):
-            df[col] = df[col].map(safe_excel)
-        
-        df.to_excel(temp_path, index=False)
-        
-        if s3:
-            s3.upload_file(temp_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
-        
-        stone_row = df[df["Stock #"] == stone_id].iloc[0]
-        supplier = stone_row.get("SUPPLIER", "")
-        
-        if supplier and s3:
-            supplier_file = f"{SUPPLIER_STOCK_FOLDER}{supplier}.xlsx"
-            try:
-                s3.download_file(CONFIG["AWS_BUCKET"], supplier_file, "/tmp/supplier_stock.xlsx")
-                supplier_df = pd.read_excel("/tmp/supplier_stock.xlsx")
+        with TempFileManager(suffix=".xlsx") as temp_path:
+            for col in df.select_dtypes(include="object"):
+                df[col] = df[col].map(safe_excel)
+            
+            df.to_excel(temp_path, index=False)
+            
+            if s3:
+                def _upload():
+                    s3.upload_file(temp_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
                 
-                if "Stock #" in supplier_df.columns and "LOCKED" in supplier_df.columns:
-                    supplier_df.loc[supplier_df["Stock #"] == stone_id, "LOCKED"] = "NO"
-                    supplier_df.to_excel("/tmp/supplier_stock.xlsx", index=False)
-                    s3.upload_file("/tmp/supplier_stock.xlsx", CONFIG["AWS_BUCKET"], supplier_file)
-            except:
-                pass
-        
-        for path in [temp_path, "/tmp/supplier_stock.xlsx"]:
-            if os.path.exists(path):
-                os.remove(path)
+                safe_s3_operation(_upload)
+            
+            stone_row = df[df["Stock #"] == stone_id].iloc[0]
+            supplier = stone_row.get("SUPPLIER", "")
+            
+            if supplier and s3:
+                supplier_file = f"{SUPPLIER_STOCK_FOLDER}{supplier}.xlsx"
+                try:
+                    with TempFileManager(suffix=".xlsx") as supplier_path:
+                        def _download_supplier():
+                            s3.download_file(CONFIG["AWS_BUCKET"], supplier_file, supplier_path)
+                        
+                        if safe_s3_operation(_download_supplier, fallback=False):
+                            supplier_df = pd.read_excel(supplier_path)
+                            
+                            if "Stock #" in supplier_df.columns and "LOCKED" in supplier_df.columns:
+                                supplier_df.loc[supplier_df["Stock #"] == stone_id, "LOCKED"] = "NO"
+                                supplier_df.to_excel(supplier_path, index=False)
+                                
+                                def _upload_supplier():
+                                    s3.upload_file(supplier_path, CONFIG["AWS_BUCKET"], supplier_file)
+                                
+                                safe_s3_operation(_upload_supplier)
+                except:
+                    pass
         
         logger.info(f"✅ Unlocked stone: {stone_id}")
         
     except Exception as e:
         logger.error(f"❌ Failed to unlock stone {stone_id}: {e}")
 
+@atomic_stock_operation
 def remove_stone_from_supplier_and_combined(stone_id: str):
     """Remove stone from both supplier and combined stock"""
     try:
@@ -847,35 +990,47 @@ def remove_stone_from_supplier_and_combined(stone_id: str):
         if not df.empty and "Stock #" in df.columns:
             df = df[df["Stock #"] != stone_id]
             
-            temp_path = "/tmp/all_suppliers_stock.xlsx"
-            df.to_excel(temp_path, index=False)
-            
-            if s3:
-                s3.upload_file(temp_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
-            
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+            with TempFileManager(suffix=".xlsx") as temp_path:
+                df.to_excel(temp_path, index=False)
+                
+                if s3:
+                    def _upload():
+                        s3.upload_file(temp_path, CONFIG["AWS_BUCKET"], COMBINED_STOCK_KEY)
+                    
+                    safe_s3_operation(_upload)
         
         if s3:
-            objs = s3.list_objects_v2(
-                Bucket=CONFIG["AWS_BUCKET"],
-                Prefix=SUPPLIER_STOCK_FOLDER
-            )
+            def _list_objects():
+                return s3.list_objects_v2(
+                    Bucket=CONFIG["AWS_BUCKET"],
+                    Prefix=SUPPLIER_STOCK_FOLDER
+                )
+            
+            objs = safe_s3_operation(_list_objects, fallback={})
             
             for obj in objs.get("Contents", []):
                 key = obj["Key"]
                 if not key.endswith(".xlsx"):
                     continue
                 
-                local_path = "/tmp/tmp_supplier.xlsx"
-                s3.download_file(CONFIG["AWS_BUCKET"], key, local_path)
-                sdf = pd.read_excel(local_path)
-                
-                if "Stock #" in sdf.columns and stone_id in sdf["Stock #"].values:
-                    sdf = sdf[sdf["Stock #"] != stone_id]
-                    sdf.to_excel(local_path, index=False)
-                    s3.upload_file(local_path, CONFIG["AWS_BUCKET"], key)
-                    break
+                with TempFileManager(suffix=".xlsx") as local_path:
+                    def _download():
+                        s3.download_file(CONFIG["AWS_BUCKET"], key, local_path)
+                    
+                    if not safe_s3_operation(_download, fallback=False):
+                        continue
+                    
+                    sdf = pd.read_excel(local_path)
+                    
+                    if "Stock #" in sdf.columns and stone_id in sdf["Stock #"].values:
+                        sdf = sdf[sdf["Stock #"] != stone_id]
+                        sdf.to_excel(local_path, index=False)
+                        
+                        def _upload():
+                            s3.upload_file(local_path, CONFIG["AWS_BUCKET"], key)
+                        
+                        safe_s3_operation(_upload)
+                        break
         
         logger.info(f"✅ Removed stone {stone_id} from all stock files")
         
@@ -888,42 +1043,44 @@ def log_deal_history(deal: Dict[str, Any]):
     try:
         if not s3:
             return
+        
+        with TempFileManager(suffix=".xlsx") as local_path:
+            def _download():
+                s3.download_file(CONFIG["AWS_BUCKET"], DEAL_HISTORY_KEY, local_path)
             
-        local_path = "/tmp/deal_history.xlsx"
-        
-        try:
-            s3.download_file(CONFIG["AWS_BUCKET"], DEAL_HISTORY_KEY, local_path)
-            df = pd.read_excel(local_path)
-        except:
-            df = pd.DataFrame(columns=[
-                "Deal ID", "Stone ID", "Supplier", "Client", "Actual Price",
-                "Offer Price", "Supplier Action", "Admin Action", "Final Status", "Created At"
-            ])
-        
-        new_row = pd.DataFrame([{
-            "Deal ID": deal.get("deal_id"),
-            "Stone ID": deal.get("stone_id"),
-            "Supplier": deal.get("supplier_username"),
-            "Client": deal.get("client_username"),
-            "Actual Price": deal.get("actual_stock_price"),
-            "Offer Price": deal.get("client_offer_price"),
-            "Supplier Action": deal.get("supplier_action"),
-            "Admin Action": deal.get("admin_action"),
-            "Final Status": deal.get("final_status"),
-            "Created At": deal.get("created_at"),
-        }])
-        
-        df = pd.concat([df, new_row], ignore_index=True)
-        df.to_excel(local_path, index=False)
-        s3.upload_file(local_path, CONFIG["AWS_BUCKET"], DEAL_HISTORY_KEY)
+            if safe_s3_operation(_download, fallback=False):
+                df = pd.read_excel(local_path)
+            else:
+                df = pd.DataFrame(columns=[
+                    "Deal ID", "Stone ID", "Supplier", "Client", "Actual Price",
+                    "Offer Price", "Supplier Action", "Admin Action", "Final Status", "Created At"
+                ])
+            
+            new_row = pd.DataFrame([{
+                "Deal ID": deal.get("deal_id"),
+                "Stone ID": deal.get("stone_id"),
+                "Supplier": deal.get("supplier_username"),
+                "Client": deal.get("client_username"),
+                "Actual Price": deal.get("actual_stock_price"),
+                "Offer Price": deal.get("client_offer_price"),
+                "Supplier Action": deal.get("supplier_action"),
+                "Admin Action": deal.get("admin_action"),
+                "Final Status": deal.get("final_status"),
+                "Created At": deal.get("created_at"),
+            }])
+            
+            df = pd.concat([df, new_row], ignore_index=True)
+            df.to_excel(local_path, index=False)
+            
+            def _upload():
+                s3.upload_file(local_path, CONFIG["AWS_BUCKET"], DEAL_HISTORY_KEY)
+            
+            safe_s3_operation(_upload)
         
         logger.info(f"✅ Logged deal to history: {deal.get('deal_id')}")
         
     except Exception as e:
         logger.error(f"❌ Failed to log deal history: {e}")
-    finally:
-        if os.path.exists(local_path):
-            os.remove(local_path)
 
 # -------- BACKGROUND TASKS --------
 async def session_cleanup_loop():
@@ -1035,12 +1192,13 @@ async def root():
         "timestamp": datetime.now().isoformat(),
         "active_sessions": len(logged_in_users),
         "aws_connected": s3 is not None,
-        "bucket": CONFIG["AWS_BUCKET"]
+        "bucket": CONFIG["AWS_BUCKET"],
+        "keep_alive_hint": "Use /health endpoint for uptime monitoring"
     }
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint for Render monitoring"""
+    """Health check endpoint for Render monitoring and keep-alive"""
     status = "healthy" if BOT_STARTED else "starting"
     
     # Test AWS connection if available
@@ -1061,12 +1219,55 @@ async def health_check():
         "aws": aws_status,
         "bucket_accessible": bucket_accessible,
         "active_users": len(logged_in_users),
+        "timestamp": datetime.now().isoformat(),
+        "uptime_hours": "Bot is active"
+    }
+
+@app.get("/health/detailed")
+async def detailed_health():
+    """Comprehensive health check for monitoring"""
+    health_status = {
+        "status": "healthy",
+        "checks": {},
         "timestamp": datetime.now().isoformat()
     }
+    
+    # Check S3
+    if s3:
+        try:
+            s3.head_bucket(Bucket=CONFIG["AWS_BUCKET"])
+            health_status["checks"]["s3"] = "ok"
+        except Exception as e:
+            health_status["checks"]["s3"] = f"failed: {str(e)}"
+            health_status["status"] = "degraded"
+    else:
+        health_status["checks"]["s3"] = "not connected"
+        health_status["status"] = "degraded"
+    
+    # Check accounts file
+    try:
+        df = load_accounts()
+        health_status["checks"]["database"] = f"ok ({len(df)} users)"
+    except Exception as e:
+        health_status["checks"]["database"] = f"failed: {str(e)}"
+        health_status["status"] = "degraded"
+    
+    # Check stock file
+    try:
+        stock_df = load_stock()
+        health_status["checks"]["stock"] = f"ok ({len(stock_df)} diamonds)"
+    except Exception as e:
+        health_status["checks"]["stock"] = f"failed: {str(e)}"
+        health_status["status"] = "degraded"
+    
+    # Check active sessions
+    health_status["checks"]["sessions"] = f"{len(logged_in_users)} active"
+    
+    return health_status
 
 @app.get("/ping")
 async def ping():
-    """Simple ping endpoint"""
+    """Simple ping endpoint for keep-alive"""
     return {
         "status": "pong",
         "service": "Diamond Trading Bot",
@@ -1103,6 +1304,11 @@ async def status_check():
             "python_version": CONFIG.get("PYTHON_VERSION"),
             "port": CONFIG.get("PORT"),
             "session_timeout": CONFIG.get("SESSION_TIMEOUT")
+        },
+        
+        "keep_alive": {
+            "recommended": "Use UptimeRobot or cron-job.org to ping /health every 10-15 minutes",
+            "endpoints": ["/health", "/ping", "/health/detailed"]
         }
     }
     
@@ -1122,7 +1328,40 @@ async def get_sessions():
     """Admin endpoint to view active sessions"""
     return {
         "active_sessions": len(logged_in_users),
-        "sessions": logged_in_users
+        "sessions": {str(k): v for k, v in logged_in_users.items()}
+    }
+
+@app.get("/keep-alive-instructions")
+async def keep_alive_instructions():
+    """Instructions for keeping the bot alive on Render"""
+    return {
+        "message": "Render free tier spins down after 15 minutes of inactivity",
+        "solutions": [
+            {
+                "name": "UptimeRobot (Free)",
+                "url": "https://uptimerobot.com",
+                "setup": "Create a monitor for your /health endpoint every 10 minutes"
+            },
+            {
+                "name": "cron-job.org (Free)", 
+                "url": "https://cron-job.org",
+                "setup": "Schedule a job to ping your /health endpoint every 10 minutes"
+            },
+            {
+                "name": "Cloudflare Worker (Free)",
+                "url": "https://github.com/ByteTrix/cloudflare-render-ping",
+                "setup": "Deploy a worker that pings your app during business hours"
+            },
+            {
+                "name": "GitHub Actions",
+                "setup": "Add a workflow that pings your app every 10 minutes"
+            }
+        ],
+        "endpoints_to_ping": [
+            "https://your-app.onrender.com/health",
+            "https://your-app.onrender.com/ping"
+        ],
+        "note": "Ping at least every 10-14 minutes to prevent sleeping"
     }
 
 # -------- NEW API ENDPOINTS FOR EXCEL UPLOAD --------
@@ -1178,12 +1417,15 @@ async def api_upload_excel(
         
         # Save to S3
         supplier_file = f"{SUPPLIER_STOCK_FOLDER}{supplier_name}.xlsx"
-        temp_path = f"/tmp/{supplier_name}.xlsx"
-        cleaned_df.to_excel(temp_path, index=False)
-        
-        if s3:
-            s3.upload_file(temp_path, CONFIG["AWS_BUCKET"], supplier_file)
-            logger.info(f"✅ Uploaded {len(cleaned_df)} diamonds for supplier {username}")
+        with TempFileManager(suffix=".xlsx") as temp_path:
+            cleaned_df.to_excel(temp_path, index=False)
+            
+            if s3:
+                def _upload():
+                    s3.upload_file(temp_path, CONFIG["AWS_BUCKET"], supplier_file)
+                
+                safe_s3_operation(_upload)
+                logger.info(f"✅ Uploaded {len(cleaned_df)} diamonds for supplier {username}")
         
         # Rebuild combined stock
         rebuild_combined_stock()
@@ -1196,14 +1438,10 @@ async def api_upload_excel(
         # Log activity
         log_activity(user, "API_UPLOAD_STOCK", {
             "stones": total_stones,
-            "carats": total_carats,
-            "value": total_value,
+            "carats": float(total_carats),
+            "value": float(total_value),
             "warnings": warnings
         })
-        
-        # Clean up
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
         
         return JSONResponse(
             status_code=200,
@@ -1524,7 +1762,7 @@ async def handle_all_messages(message: types.Message):
         uid = message.from_user.id
         text = message.text.strip()
         
-        logger.info(f"📩 Received message from {uid}: {text}")
+        logger.info(f"📩 Received message from {uid}: {text[:50]}...")
         
         # Rate limiting
         if is_rate_limited(uid):
@@ -1799,24 +2037,21 @@ async def handle_search_flow(message: types.Message, state: Dict):
         total_carats = filtered_df["Weight"].sum()
         
         if total_diamonds > 10:
-            excel_path = "/tmp/search_results.xlsx"
-            filtered_df.to_excel(excel_path, index=False)
-            
-            await message.reply_document(
-                types.FSInputFile(excel_path),
-                caption=(
-                    f"💎 Found {total_diamonds} diamonds\n"
-                    f"📊 Total weight: {total_carats:.2f} ct\n"
-                    f"🎯 Your filters:\n"
-                    f"• Carat: {search['carat']}\n"
-                    f"• Shape: {search['shape']}\n"
-                    f"• Color: {search['color']}\n"
-                    f"• Clarity: {search['clarity']}"
+            with TempFileManager(suffix=".xlsx") as excel_path:
+                filtered_df.to_excel(excel_path, index=False)
+                
+                await message.reply_document(
+                    types.FSInputFile(excel_path),
+                    caption=(
+                        f"💎 Found {total_diamonds} diamonds\n"
+                        f"📊 Total weight: {total_carats:.2f} ct\n"
+                        f"🎯 Your filters:\n"
+                        f"• Carat: {search['carat']}\n"
+                        f"• Shape: {search['shape']}\n"
+                        f"• Color: {search['color']}\n"
+                        f"• Clarity: {search['clarity']}"
+                    )
                 )
-            )
-            
-            if os.path.exists(excel_path):
-                os.remove(excel_path)
         else:
             for _, row in filtered_df.iterrows():
                 msg = (
@@ -1894,7 +2129,7 @@ async def handle_deal_flow(message: types.Message, state: Dict):
             "supplier_action": "PENDING",
             "admin_action": "PENDING",
             "final_status": "OPEN",
-            "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+            "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")  # FIXED: Corrected format
         }
         
         if not atomic_lock_stone(stone_id):
@@ -2030,16 +2265,13 @@ async def view_all_stock(message: types.Message, user: Dict):
         
         await message.reply(summary)
         
-        excel_path = "/tmp/all_stock.xlsx"
-        df.to_excel(excel_path, index=False)
-        
-        await message.reply_document(
-            types.FSInputFile(excel_path),
-            caption=f"📊 Complete Stock List ({total_diamonds} diamonds)"
-        )
-        
-        if os.path.exists(excel_path):
-            os.remove(excel_path)
+        with TempFileManager(suffix=".xlsx") as excel_path:
+            df.to_excel(excel_path, index=False)
+            
+            await message.reply_document(
+                types.FSInputFile(excel_path),
+                caption=f"📊 Complete Stock List ({total_diamonds} diamonds)"
+            )
         
         log_activity(user, "VIEW_ALL_STOCK")
         
@@ -2074,16 +2306,13 @@ async def view_users(message: types.Message, user: Dict):
         
         await message.reply(stats_msg)
         
-        excel_path = "/tmp/all_users.xlsx"
-        df.to_excel(excel_path, index=False)
-        
-        await message.reply_document(
-            types.FSInputFile(excel_path),
-            caption=f"👥 User List ({len(df)} users)"
-        )
-        
-        if os.path.exists(excel_path):
-            os.remove(excel_path)
+        with TempFileManager(suffix=".xlsx") as excel_path:
+            df.to_excel(excel_path, index=False)
+            
+            await message.reply_document(
+                types.FSInputFile(excel_path),
+                caption=f"👥 User List ({len(df)} users)"
+            )
         
         log_activity(user, "VIEW_USERS")
         
@@ -2153,16 +2382,13 @@ async def supplier_leaderboard(message: types.Message, user: Dict):
         
         await message.reply(leaderboard_msg)
         
-        excel_path = "/tmp/supplier_leaderboard.xlsx"
-        supplier_stats.to_excel(excel_path)
-        
-        await message.reply_document(
-            types.FSInputFile(excel_path),
-            caption="📊 Supplier Leaderboard Details"
-        )
-        
-        if os.path.exists(excel_path):
-            os.remove(excel_path)
+        with TempFileManager(suffix=".xlsx") as excel_path:
+            supplier_stats.to_excel(excel_path)
+            
+            await message.reply_document(
+                types.FSInputFile(excel_path),
+                caption="📊 Supplier Leaderboard Details"
+            )
         
         log_activity(user, "VIEW_SUPPLIER_LEADERBOARD")
         
@@ -2183,9 +2409,6 @@ async def user_activity_report(message: types.Message, user: Dict):
             types.FSInputFile(excel_path),
             caption="📑 User Activity Report"
         )
-        
-        if os.path.exists(excel_path):
-            os.remove(excel_path)
         
         log_activity(user, "DOWNLOAD_ACTIVITY_REPORT")
         
@@ -2251,49 +2474,51 @@ async def supplier_my_stock(message: types.Message, user: Dict):
         stock_key = f"{SUPPLIER_STOCK_FOLDER}{supplier_key}.xlsx"
         
         try:
-            local_path = "/tmp/my_stock.xlsx"
-            s3.download_file(CONFIG["AWS_BUCKET"], stock_key, local_path)
-            
-            df = pd.read_excel(local_path)
-            
-            total_stones = len(df)
-            total_carats = df["Weight"].sum() if "Weight" in df.columns else 0
-            avg_price = df["Price Per Carat"].mean() if "Price Per Carat" in df.columns else 0
-            total_value = (df["Weight"] * df["Price Per Carat"]).sum() if "Weight" in df.columns and "Price Per Carat" in df.columns else 0
-            
-            stats_msg = (
-                f"📦 **Your Stock Summary**\n\n"
-                f"💎 Total Diamonds: {total_stones}\n"
-                f"⚖️ Total Carats: {total_carats:.2f}\n"
-                f"💰 Average Price: ${avg_price:,.2f}/ct\n"
-                f"🏦 Total Value: ${total_value:,.2f}\n\n"
-            )
-            
-            if "Shape" in df.columns and not df["Shape"].empty:
-                shape_counts = df["Shape"].value_counts().head(5)
-                if not shape_counts.empty:
-                    stats_msg += f"**Stock Distribution:**\n"
-                    for shape, count in shape_counts.items():
-                        stats_msg += f"• {shape}: {count}\n"
-            
-            await message.reply(stats_msg)
-            
-            await message.reply_document(
-                types.FSInputFile(local_path),
-                caption=f"📦 Your Stock File ({total_stones} diamonds)"
-            )
-            
-            log_activity(user, "VIEW_MY_STOCK")
-            
+            with TempFileManager(suffix=".xlsx") as local_path:
+                def _download():
+                    s3.download_file(CONFIG["AWS_BUCKET"], stock_key, local_path)
+                
+                if not safe_s3_operation(_download, fallback=False):
+                    await message.reply("❌ You haven't uploaded any stock yet.")
+                    return
+                
+                df = pd.read_excel(local_path)
+                
+                total_stones = len(df)
+                total_carats = df["Weight"].sum() if "Weight" in df.columns else 0
+                avg_price = df["Price Per Carat"].mean() if "Price Per Carat" in df.columns else 0
+                total_value = (df["Weight"] * df["Price Per Carat"]).sum() if "Weight" in df.columns and "Price Per Carat" in df.columns else 0
+                
+                stats_msg = (
+                    f"📦 **Your Stock Summary**\n\n"
+                    f"💎 Total Diamonds: {total_stones}\n"
+                    f"⚖️ Total Carats: {total_carats:.2f}\n"
+                    f"💰 Average Price: ${avg_price:,.2f}/ct\n"
+                    f"🏦 Total Value: ${total_value:,.2f}\n\n"
+                )
+                
+                if "Shape" in df.columns and not df["Shape"].empty:
+                    shape_counts = df["Shape"].value_counts().head(5)
+                    if not shape_counts.empty:
+                        stats_msg += f"**Stock Distribution:**\n"
+                        for shape, count in shape_counts.items():
+                            stats_msg += f"• {shape}: {count}\n"
+                
+                await message.reply(stats_msg)
+                
+                await message.reply_document(
+                    types.FSInputFile(local_path),
+                    caption=f"📦 Your Stock File ({total_stones} diamonds)"
+                )
+                
+                log_activity(user, "VIEW_MY_STOCK")
+                
         except Exception as e:
             logger.error(f"❌ Error loading supplier stock: {e}")
-            await message.reply("❌ You haven't uploaded any stock yet or there was an error loading it.")
+            await message.reply("❌ Failed to load stock data.")
     except Exception as e:
         logger.error(f"❌ Error in supplier_my_stock: {e}")
         await message.reply("❌ Failed to load stock data.")
-    finally:
-        if os.path.exists("/tmp/my_stock.xlsx"):
-            os.remove("/tmp/my_stock.xlsx")
 
 async def supplier_analytics(message: types.Message, user: Dict):
     """Supplier: Price analytics"""
@@ -2371,16 +2596,13 @@ async def supplier_analytics(message: types.Message, user: Dict):
         
         await message.reply(summary_msg)
         
-        excel_path = "/tmp/price_analytics.xlsx"
-        results_df.to_excel(excel_path, index=False)
-        
-        await message.reply_document(
-            types.FSInputFile(excel_path),
-            caption=f"📊 Detailed Price Analysis ({len(results_df)} stones)"
-        )
-        
-        if os.path.exists(excel_path):
-            os.remove(excel_path)
+        with TempFileManager(suffix=".xlsx") as excel_path:
+            results_df.to_excel(excel_path, index=False)
+            
+            await message.reply_document(
+                types.FSInputFile(excel_path),
+                caption=f"📊 Detailed Price Analysis ({len(results_df)} stones)"
+            )
         
         log_activity(user, "VIEW_ANALYTICS")
         
@@ -2532,16 +2754,13 @@ async def smart_deals(message: types.Message, user: Dict):
         await message.reply(deals_msg)
         
         if len(good_deals) > 5:
-            excel_path = "/tmp/smart_deals.xlsx"
-            good_deals[["Stock #", "Shape", "Weight", "Color", "Clarity", "Price Per Carat", "Discount_%", "Lab"]].to_excel(excel_path, index=False)
-            
-            await message.reply_document(
-                types.FSInputFile(excel_path),
-                caption=f"📊 Complete Smart Deals List ({len(good_deals)} diamonds)"
-            )
-            
-            if os.path.exists(excel_path):
-                os.remove(excel_path)
+            with TempFileManager(suffix=".xlsx") as excel_path:
+                good_deals[["Stock #", "Shape", "Weight", "Color", "Clarity", "Price Per Carat", "Discount_%", "Lab"]].to_excel(excel_path, index=False)
+                
+                await message.reply_document(
+                    types.FSInputFile(excel_path),
+                    caption=f"📊 Complete Smart Deals List ({len(good_deals)} diamonds)"
+                )
         
         log_activity(user, "VIEW_SMART_DEALS")
         
@@ -2568,32 +2787,29 @@ async def request_deal_start(message: types.Message, user: Dict):
                     "Offer Price ($/ct)": ""
                 }])], ignore_index=True)
             
-            excel_path = "/tmp/deal_request_template.xlsx"
-            template_df.to_excel(excel_path, index=False)
-            
-            await message.reply_document(
-                types.FSInputFile(excel_path),
-                caption=(
-                    "📊 **Bulk Deal Request Template**\n\n"
-                    "**Instructions:**\n"
-                    "1. Fill in your offer price for each stone\n"
-                    "2. Save the file\n"
-                    "3. Send it back to me\n\n"
-                    "**Notes:**\n"
-                    "• Only fill prices for stones you want\n"
-                    "• Leave blank to skip\n"
-                    "• Prices should be $ per carat\n"
-                    "• Remove example rows if not needed"
+            with TempFileManager(suffix=".xlsx") as excel_path:
+                template_df.to_excel(excel_path, index=False)
+                
+                await message.reply_document(
+                    types.FSInputFile(excel_path),
+                    caption=(
+                        "📊 **Bulk Deal Request Template**\n\n"
+                        "**Instructions:**\n"
+                        "1. Fill in your offer price for each stone\n"
+                        "2. Save the file\n"
+                        "3. Send it back to me\n\n"
+                        "**Notes:**\n"
+                        "• Only fill prices for stones you want\n"
+                        "• Leave blank to skip\n"
+                        "• Prices should be $ per carat\n"
+                        "• Remove example rows if not needed"
+                    )
                 )
-            )
             
             user_state[message.from_user.id] = {
                 "step": "bulk_deal_excel",
                 "last_updated": time.time()
             }
-            
-            if os.path.exists(excel_path):
-                os.remove(excel_path)
                 
         else:
             user_state[message.from_user.id] = {
@@ -2635,11 +2851,14 @@ async def view_deals(message: types.Message, user: Dict):
         if not s3:
             await message.reply("❌ AWS connection not available.")
             return
-            
-        objs = s3.list_objects_v2(
-            Bucket=CONFIG["AWS_BUCKET"],
-            Prefix=DEALS_FOLDER
-        )
+        
+        def _list_objects():
+            return s3.list_objects_v2(
+                Bucket=CONFIG["AWS_BUCKET"],
+                Prefix=DEALS_FOLDER
+            )
+        
+        objs = safe_s3_operation(_list_objects, fallback={})
         
         if "Contents" not in objs:
             await message.reply("ℹ️ No deals found.")
@@ -2651,13 +2870,16 @@ async def view_deals(message: types.Message, user: Dict):
                 continue
             
             try:
-                deal_data = s3.get_object(
-                    Bucket=CONFIG["AWS_BUCKET"],
-                    Key=obj["Key"]
-                )["Body"].read().decode("utf-8")
+                def _get_object():
+                    return s3.get_object(
+                        Bucket=CONFIG["AWS_BUCKET"],
+                        Key=obj["Key"]
+                    )["Body"].read().decode("utf-8")
                 
-                deal = json.loads(deal_data)
-                deals.append(deal)
+                deal_data = safe_s3_operation(_get_object, fallback="")
+                if deal_data:
+                    deal = json.loads(deal_data)
+                    deals.append(deal)
             except Exception as e:
                 logger.error(f"Failed to load deal {obj['Key']}: {e}")
                 continue
@@ -2726,16 +2948,13 @@ async def view_deals(message: types.Message, user: Dict):
             })
         
         df = pd.DataFrame(excel_data)
-        excel_path = f"/tmp/{username}_deals.xlsx"
-        df.to_excel(excel_path, index=False)
-        
-        await message.reply_document(
-            types.FSInputFile(excel_path),
-            caption=f"📊 {title} Details"
-        )
-        
-        if os.path.exists(excel_path):
-            os.remove(excel_path)
+        with TempFileManager(suffix=".xlsx") as excel_path:
+            df.to_excel(excel_path, index=False)
+            
+            await message.reply_document(
+                types.FSInputFile(excel_path),
+                caption=f"📊 {title} Details"
+            )
         
         log_activity(user, f"VIEW_{user_role.upper()}_DEALS")
         
@@ -2826,10 +3045,13 @@ async def confirm_delete_stock(callback: types.CallbackQuery):
             await callback.answer("❌ AWS connection not available", show_alert=True)
             return
         
-        objs = s3.list_objects_v2(
-            Bucket=CONFIG["AWS_BUCKET"],
-            Prefix=SUPPLIER_STOCK_FOLDER
-        )
+        def _list_objects():
+            return s3.list_objects_v2(
+                Bucket=CONFIG["AWS_BUCKET"],
+                Prefix=SUPPLIER_STOCK_FOLDER
+            )
+        
+        objs = safe_s3_operation(_list_objects, fallback={})
         
         deleted_count = 0
         if "Contents" in objs:
@@ -2868,6 +3090,7 @@ async def cancel_delete(callback: types.CallbackQuery):
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     """Handle document uploads (Excel files)"""
+    temp_path = None
     try:
         uid = message.from_user.id
         user = get_logged_user(uid)
@@ -2913,8 +3136,11 @@ async def handle_document(message: types.Message):
         await message.reply(f"❌ Error processing file: {str(e)}")
         
     finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
 
 async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str):
     """Handle supplier stock upload"""
@@ -2940,12 +3166,15 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
         
         # Save to S3
         supplier_file = f"{SUPPLIER_STOCK_FOLDER}{supplier_name}.xlsx"
-        temp_supplier_path = f"/tmp/{supplier_name}.xlsx"
         
-        cleaned_df.to_excel(temp_supplier_path, index=False)
-        
-        if s3:
-            s3.upload_file(temp_supplier_path, CONFIG["AWS_BUCKET"], supplier_file)
+        with TempFileManager(suffix=".xlsx") as temp_supplier_path:
+            cleaned_df.to_excel(temp_supplier_path, index=False)
+            
+            if s3:
+                def _upload():
+                    s3.upload_file(temp_supplier_path, CONFIG["AWS_BUCKET"], supplier_file)
+                
+                safe_s3_operation(_upload)
         
         # Rebuild combined stock
         rebuild_combined_stock()
@@ -2976,13 +3205,10 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
         
         log_activity(user, "UPLOAD_STOCK", {
             "stones": total_stones,
-            "carats": total_carats,
-            "value": total_value,
+            "carats": float(total_carats),
+            "value": float(total_value),
             "warnings": warnings
         })
-        
-        if os.path.exists(temp_supplier_path):
-            os.remove(temp_supplier_path)
             
     except Exception as e:
         logger.error(f"❌ Error in handle_supplier_stock_upload: {e}")
@@ -3041,7 +3267,7 @@ async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.D
                 "supplier_action": "PENDING",
                 "admin_action": "PENDING",
                 "final_status": "OPEN",
-                "created_at": datetime.now(IST).strftime("%Y-%m-d %H:%M:%S")
+                "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")  # FIXED: Corrected format
             }
             
             if not atomic_lock_stone(stone_id):
@@ -3117,8 +3343,15 @@ async def handle_admin_deal_approvals(message: types.Message, user: Dict, df: pd
                     continue
                     
                 deal_key = f"{DEALS_FOLDER}{deal_id}.json"
-                deal_data = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=deal_key)
-                deal = json.loads(deal_data["Body"].read())
+                
+                def _get_deal():
+                    return s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=deal_key)
+                
+                deal_response = safe_s3_operation(_get_deal, fallback=None)
+                if not deal_response:
+                    continue
+                    
+                deal = json.loads(deal_response["Body"].read())
                 
                 if deal.get("final_status") in ["COMPLETED", "CLOSED"]:
                     continue
@@ -3153,12 +3386,15 @@ async def handle_admin_deal_approvals(message: types.Message, user: Dict, df: pd
                         f"❌ Deal {deal_id} rejected for Stone {deal['stone_id']}"
                     )
                 
-                s3.put_object(
-                    Bucket=CONFIG["AWS_BUCKET"],
-                    Key=deal_key,
-                    Body=json.dumps(deal, indent=2),
-                    ContentType="application/json"
-                )
+                def _save_deal():
+                    s3.put_object(
+                        Bucket=CONFIG["AWS_BUCKET"],
+                        Key=deal_key,
+                        Body=json.dumps(deal, indent=2),
+                        ContentType="application/json"
+                    )
+                
+                safe_s3_operation(_save_deal)
                 
                 log_deal_history(deal)
                 processed += 1
@@ -3197,8 +3433,15 @@ async def handle_supplier_deal_responses(message: types.Message, user: Dict, df:
                     continue
                     
                 deal_key = f"{DEALS_FOLDER}{deal_id}.json"
-                deal_data = s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=deal_key)
-                deal = json.loads(deal_data["Body"].read())
+                
+                def _get_deal():
+                    return s3.get_object(Bucket=CONFIG["AWS_BUCKET"], Key=deal_key)
+                
+                deal_response = safe_s3_operation(_get_deal, fallback=None)
+                if not deal_response:
+                    continue
+                    
+                deal = json.loads(deal_response["Body"].read())
                 
                 if deal.get("supplier_username", "").lower() != user["USERNAME"].lower():
                     continue
@@ -3238,12 +3481,15 @@ async def handle_supplier_deal_responses(message: types.Message, user: Dict, df:
                         f"❌ Supplier rejected deal {deal_id} for Stone {deal['stone_id']}"
                     )
                 
-                s3.put_object(
-                    Bucket=CONFIG["AWS_BUCKET"],
-                    Key=deal_key,
-                    Body=json.dumps(deal, indent=2),
-                    ContentType="application/json"
-                )
+                def _save_deal():
+                    s3.put_object(
+                        Bucket=CONFIG["AWS_BUCKET"],
+                        Key=deal_key,
+                        Body=json.dumps(deal, indent=2),
+                        ContentType="application/json"
+                    )
+                
+                safe_s3_operation(_save_deal)
                 
                 log_deal_history(deal)
                 processed += 1
@@ -3267,6 +3513,7 @@ if __name__ == "__main__":
     logger.info(f"🔗 Webhook URL: {CONFIG['WEBHOOK_URL']}")
     logger.info(f"🤖 Bot Token: {'Set' if CONFIG['BOT_TOKEN'] else 'Not Set'}")
     logger.info(f"📦 S3 Bucket: {CONFIG['AWS_BUCKET']}")
+    logger.info(f"⏰ Keep-Alive: Use /health endpoint with external monitoring to prevent Render from sleeping")
     
     # Check if all required environment variables are set
     required_vars = ["BOT_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_BUCKET"]
@@ -3277,6 +3524,20 @@ if __name__ == "__main__":
         logger.error("Please set these in your Render environment variables.")
     else:
         logger.info("✅ All required environment variables are set")
+    
+    # Print keep-alive instructions
+    print("\n" + "="*60)
+    print("🔴 IMPORTANT: Render Free Tier Sleep Prevention")
+    print("="*60)
+    print("Your bot will sleep after 15 minutes of inactivity!")
+    print("\nTo keep it alive, set up a monitoring service:")
+    print("1. 📊 UptimeRobot (free): https://uptimerobot.com")
+    print("   → Monitor your /health endpoint every 10 minutes")
+    print("\n2. ⏰ cron-job.org (free): https://cron-job.org")
+    print("   → Schedule a job to ping /health every 10 minutes")
+    print("\n3. ☁️ Cloudflare Worker (free):")
+    print("   → https://github.com/ByteTrix/cloudflare-render-ping")
+    print("="*60 + "\n")
     
     uvicorn.run(
         app,
