@@ -2067,147 +2067,20 @@ async def handle_all_messages(message: types.Message):
             
             # Account creation flow
             if state.get("step") == "create_username":
-                username = text
-                
-                if len(username) < 3:
-                    await message.reply("❌ Username must be at least 3 characters.")
-                    return
-                
-                df = load_accounts()
-                if not df[df["USERNAME"].str.lower() == username.lower()].empty:
-                    await message.reply("❌ Username already exists.")
-                    user_state.pop(uid, None)
-                    return
-                
-                state["username"] = username
-                state["step"] = "create_password"
-                
-                await message.reply("🔐 Enter password (minimum 4 characters):")
+                await handle_create_username(message, state)
                 return
             
             elif state.get("step") == "create_password":
-                password = text
-                
-                if len(password) < 4:
-                    await message.reply("❌ Password must be at least 4 characters.")
-                    return
-                
-                username = state["username"]
-                
-                df = load_accounts()
-                new_row = {
-                    "USERNAME": username,
-                    "PASSWORD": clean_password(password),
-                    "ROLE": "client",
-                    "APPROVED": "NO"
-                }
-                
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                save_accounts(df)
-                
-                user_state.pop(uid, None)
-                
-                await message.reply(
-                    "✅ Account created successfully!\n\n"
-                    "⏳ Your account is pending admin approval.\n"
-                    "You'll be notified once approved.\n\n"
-                    "Use /login after approval."
-                )
-                
-                admin_df = df[df["ROLE"].str.lower() == "admin"]
-                for _, admin in admin_df.iterrows():
-                    save_notification(
-                        admin["USERNAME"],
-                        "admin",
-                        f"📝 New account pending approval: {username}"
-                    )
-                
-                log_activity({"USERNAME": username, "ROLE": "client", "TELEGRAM_ID": uid}, "ACCOUNT_CREATED")
+                await handle_create_password(message, state)
                 return
             
             # Login flow
             elif state.get("step") == "login_username":
-                username = text
-                state["login_username"] = username
-                state["step"] = "login_password"
-                
-                await message.reply("🔐 Enter password:")
+                await handle_login_username(message, state)
                 return
             
             elif state.get("step") == "login_password":
-                password = text
-                username = state.get("login_username", "")
-                
-                df = load_accounts()
-                
-                if df.empty:
-                    await message.reply("❌ No accounts found in system.")
-                    user_state.pop(uid, None)
-                    return
-                
-                df["USERNAME"] = df["USERNAME"].apply(clean_text)
-                df["PASSWORD"] = df["PASSWORD"].apply(clean_password)
-                df["APPROVED"] = df["APPROVED"].apply(clean_text).str.upper()
-                df["ROLE"] = df["ROLE"].apply(clean_text).str.lower()
-                
-                username_clean = clean_text(username)
-                password_clean = clean_password(password)
-                
-                user_row = df[
-                    (df["USERNAME"].str.lower() == username_clean.lower()) &
-                    (df["PASSWORD"] == password_clean) &
-                    (df["APPROVED"] == "YES")
-                ]
-                
-                if user_row.empty:
-                    await message.reply(
-                        "❌ Invalid login credentials\n\n"
-                        "Possible reasons:\n"
-                        "• Username/password incorrect\n"
-                        "• Account not approved by admin\n"
-                        "• Account doesn't exist\n\n"
-                        "Please check your credentials and try again."
-                    )
-                    user_state.pop(uid, None)
-                    return
-                
-                user_data = user_row.iloc[0].to_dict()
-                role = user_data["ROLE"].lower()
-                
-                logged_in_users[uid] = {
-                    "USERNAME": user_data["USERNAME"],
-                    "ROLE": role,
-                    "SUPPLIER_KEY": f"supplier_{user_data['USERNAME'].lower()}" if role == "supplier" else None,
-                    "last_active": time.time()
-                }
-                save_sessions()
-                
-                log_activity(logged_in_users[uid], "LOGIN")
-                
-                if role == "admin":
-                    kb = admin_kb
-                    welcome_msg = f"👑 Welcome Admin {user_data['USERNAME']}"
-                elif role == "supplier":
-                    kb = supplier_kb
-                    welcome_msg = f"💎 Welcome Supplier {user_data['USERNAME']}"
-                else:
-                    kb = client_kb
-                    welcome_msg = f"🥂 Welcome {user_data['USERNAME']}"
-                
-                await message.reply(welcome_msg, reply_markup=kb)
-                
-                notifications = fetch_unread_notifications(user_data["USERNAME"], role)
-                if notifications:
-                    note_msg = "🔔 **Unread Notifications**\n\n"
-                    for note in notifications[:5]:
-                        note_msg += f"• {note['message']}\n   🕒 {note['time']}\n\n"
-                    
-                    if len(notifications) > 5:
-                        note_msg += f"... and {len(notifications) - 5} more\n"
-                    
-                    await message.reply(note_msg, parse_mode=ParseMode.MARKDOWN)
-                
-                user_state.pop(uid, None)
+                await handle_login_password(message, state)
                 return
             
             # Diamond search flow
@@ -2234,31 +2107,29 @@ async def handle_all_messages(message: types.Message):
             if text in menu_buttons:
                 await handle_logged_in_buttons(message, user)
             else:
-                # If it's not a menu button but user is logged in, just ignore or show appropriate response
-                # But don't show "Please use menu buttons" message unnecessarily
+                # If it's not a menu button but user is logged in, show appropriate menu
                 role = user.get("ROLE", "").lower()
                 if role == "supplier":
-                    # Only show this if it's not a command and not empty
-                    if text and not text.startswith('/'):
-                        await message.reply(
-                            "Please use the menu buttons below to navigate:",
-                            reply_markup=supplier_kb
-                        )
+                    await message.reply(
+                        "Please use the menu buttons below to navigate:",
+                        reply_markup=supplier_kb
+                    )
                 elif role == "admin":
-                    if text and not text.startswith('/'):
-                        await message.reply(
-                            "Please use the menu buttons below to navigate:",
-                            reply_markup=admin_kb
-                        )
+                    await message.reply(
+                        "Please use the menu buttons below to navigate:",
+                        reply_markup=admin_kb
+                    )
                 elif role == "client":
-                    if text and not text.startswith('/'):
-                        await message.reply(
-                            "Please use the menu buttons below to navigate:",
-                            reply_markup=client_kb
-                        )
+                    await message.reply(
+                        "Please use the menu buttons below to navigate:",
+                        reply_markup=client_kb
+                    )
         else:
-            # Only show login message if it's not a command
-            if text and not text.startswith('/'):
+            # Handle non-logged in users
+            if text.startswith('/'):
+                # Commands are handled separately
+                return
+            else:
                 await message.reply(
                     "🔒 Please login first using /login\n"
                     "Or create an account using /createaccount"
@@ -2270,6 +2141,176 @@ async def handle_all_messages(message: types.Message):
             await message.reply("❌ An error occurred. Please try again.")
         except:
             pass  # Message might be too old to reply
+
+async def handle_create_username(message: types.Message, state: Dict):
+    """Handle username input during account creation"""
+    try:
+        uid = message.from_user.id
+        username = message.text.strip()
+        
+        if len(username) < 3:
+            await message.reply("❌ Username must be at least 3 characters.")
+            return
+        
+        df = load_accounts()
+        if not df[df["USERNAME"].str.lower() == username.lower()].empty:
+            await message.reply("❌ Username already exists.")
+            user_state.pop(uid, None)
+            return
+        
+        state["username"] = username
+        state["step"] = "create_password"
+        
+        await message.reply("🔐 Enter password (minimum 4 characters):")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in handle_create_username: {e}")
+        await message.reply("❌ An error occurred. Please try again.")
+        user_state.pop(message.from_user.id, None)
+
+async def handle_create_password(message: types.Message, state: Dict):
+    """Handle password input during account creation"""
+    try:
+        uid = message.from_user.id
+        password = message.text.strip()
+        
+        if len(password) < 4:
+            await message.reply("❌ Password must be at least 4 characters.")
+            return
+        
+        username = state["username"]
+        
+        df = load_accounts()
+        new_row = {
+            "USERNAME": username,
+            "PASSWORD": clean_password(password),
+            "ROLE": "client",
+            "APPROVED": "NO"
+        }
+        
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        save_accounts(df)
+        
+        user_state.pop(uid, None)
+        
+        await message.reply(
+            "✅ Account created successfully!\n\n"
+            "⏳ Your account is pending admin approval.\n"
+            "You'll be notified once approved.\n\n"
+            "Use /login after approval."
+        )
+        
+        admin_df = df[df["ROLE"].str.lower() == "admin"]
+        for _, admin in admin_df.iterrows():
+            save_notification(
+                admin["USERNAME"],
+                "admin",
+                f"📝 New account pending approval: {username}"
+            )
+        
+        log_activity({"USERNAME": username, "ROLE": "client", "TELEGRAM_ID": uid}, "ACCOUNT_CREATED")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in handle_create_password: {e}")
+        await message.reply("❌ An error occurred. Please try again.")
+        user_state.pop(message.from_user.id, None)
+
+async def handle_login_username(message: types.Message, state: Dict):
+    """Handle username input during login"""
+    try:
+        username = message.text.strip()
+        state["login_username"] = username
+        state["step"] = "login_password"
+        
+        await message.reply("🔐 Enter password:")
+        
+    except Exception as e:
+        logger.error(f"❌ Error in handle_login_username: {e}")
+        await message.reply("❌ An error occurred. Please try again.")
+        user_state.pop(message.from_user.id, None)
+
+async def handle_login_password(message: types.Message, state: Dict):
+    """Handle password input during login"""
+    try:
+        uid = message.from_user.id
+        password = message.text.strip()
+        username = state.get("login_username", "")
+        
+        df = load_accounts()
+        
+        if df.empty:
+            await message.reply("❌ No accounts found in system.")
+            user_state.pop(uid, None)
+            return
+        
+        df["USERNAME"] = df["USERNAME"].apply(clean_text)
+        df["PASSWORD"] = df["PASSWORD"].apply(clean_password)
+        df["APPROVED"] = df["APPROVED"].apply(clean_text).str.upper()
+        df["ROLE"] = df["ROLE"].apply(clean_text).str.lower()
+        
+        username_clean = clean_text(username)
+        password_clean = clean_password(password)
+        
+        user_row = df[
+            (df["USERNAME"].str.lower() == username_clean.lower()) &
+            (df["PASSWORD"] == password_clean) &
+            (df["APPROVED"] == "YES")
+        ]
+        
+        if user_row.empty:
+            await message.reply(
+                "❌ Invalid login credentials\n\n"
+                "Possible reasons:\n"
+                "• Username/password incorrect\n"
+                "• Account not approved by admin\n"
+                "• Account doesn't exist\n\n"
+                "Please check your credentials and try again."
+            )
+            user_state.pop(uid, None)
+            return
+        
+        user_data = user_row.iloc[0].to_dict()
+        role = user_data["ROLE"].lower()
+        
+        logged_in_users[uid] = {
+            "USERNAME": user_data["USERNAME"],
+            "ROLE": role,
+            "SUPPLIER_KEY": f"supplier_{user_data['USERNAME'].lower()}" if role == "supplier" else None,
+            "last_active": time.time()
+        }
+        save_sessions()
+        
+        log_activity(logged_in_users[uid], "LOGIN")
+        
+        if role == "admin":
+            kb = admin_kb
+            welcome_msg = f"👑 Welcome Admin {user_data['USERNAME']}"
+        elif role == "supplier":
+            kb = supplier_kb
+            welcome_msg = f"💎 Welcome Supplier {user_data['USERNAME']}"
+        else:
+            kb = client_kb
+            welcome_msg = f"🥂 Welcome {user_data['USERNAME']}"
+        
+        await message.reply(welcome_msg, reply_markup=kb)
+        
+        notifications = fetch_unread_notifications(user_data["USERNAME"], role)
+        if notifications:
+            note_msg = "🔔 **Unread Notifications**\n\n"
+            for note in notifications[:5]:
+                note_msg += f"• {note['message']}\n   🕒 {note['time']}\n\n"
+            
+            if len(notifications) > 5:
+                note_msg += f"... and {len(notifications) - 5} more\n"
+            
+            await message.reply(note_msg, parse_mode=ParseMode.MARKDOWN)
+        
+        user_state.pop(uid, None)
+        
+    except Exception as e:
+        logger.error(f"❌ Error in handle_login_password: {e}")
+        await message.reply("❌ An error occurred during login. Please try again.")
+        user_state.pop(message.from_user.id, None)
 
 # -------- SEARCH FLOW HANDLER --------
 async def handle_search_flow(message: types.Message, state: Dict):
@@ -2397,9 +2438,10 @@ async def handle_search_flow(message: types.Message, state: Dict):
             })
             
             user_state.pop(uid, None)
+            
     except Exception as e:
         logger.error(f"❌ Error in search flow: {e}")
-        await message.reply("❌ An error occurred during search.")
+        await message.reply("❌ An error occurred during search. Please try again.")
         user_state.pop(uid, None)
 
 # -------- DEAL FLOW HANDLER --------
@@ -2502,9 +2544,10 @@ async def handle_deal_flow(message: types.Message, state: Dict):
             )
             
             user_state.pop(uid, None)
+            
     except Exception as e:
         logger.error(f"❌ Error in deal flow: {e}")
-        await message.reply("❌ An error occurred during deal request.")
+        await message.reply("❌ An error occurred during deal request. Please try again.")
         user_state.pop(uid, None)
 
 # -------- LOGGED IN BUTTON HANDLERS --------
