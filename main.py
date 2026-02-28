@@ -1943,6 +1943,7 @@ async def help_command(message: types.Message):
         logger.info(f"✅ /help command handled for user {message.from_user.id}")
     except Exception as e:
         logger.error(f"❌ Error in /help handler: {e}")
+        await message.reply("❌ An error occurred. Please try again.")
 
 @dp.message(Command("createaccount"))
 async def create_account(message: types.Message):
@@ -1954,6 +1955,7 @@ async def create_account(message: types.Message):
             await message.reply("⏳ Please wait before creating another account.")
             return
         
+        # Clear any existing state
         user_state[uid] = {
             "step": "create_username",
             "last_updated": time.time()
@@ -1966,6 +1968,7 @@ async def create_account(message: types.Message):
         logger.info(f"✅ Account creation started for user {uid}")
     except Exception as e:
         logger.error(f"❌ Error in create_account handler: {e}")
+        await message.reply("❌ An error occurred. Please try again.")
 
 @dp.message(Command("login"))
 async def login_command(message: types.Message):
@@ -1986,7 +1989,7 @@ async def login_command(message: types.Message):
             )
             return
         
-        # Start new login
+        # Clear any existing state
         user_state[uid] = {
             "step": "login_username",
             "last_updated": time.time()
@@ -1996,6 +1999,7 @@ async def login_command(message: types.Message):
         logger.info(f"✅ Login started for user {uid}")
     except Exception as e:
         logger.error(f"❌ Error in login_command handler: {e}")
+        await message.reply("❌ An error occurred. Please try again.")
 
 @dp.message(Command("logout"))
 async def logout_command(message: types.Message):
@@ -2022,6 +2026,7 @@ async def logout_command(message: types.Message):
         logger.info(f"✅ User {user['USERNAME']} logged out")
     except Exception as e:
         logger.error(f"❌ Error in logout_command handler: {e}")
+        await message.reply("❌ An error occurred. Please try again.")
 
 @dp.message(Command("reset"))
 async def reset_state_command(message: types.Message):
@@ -2033,6 +2038,7 @@ async def reset_state_command(message: types.Message):
         logger.info(f"✅ User state reset for user {uid}")
     except Exception as e:
         logger.error(f"❌ Error in reset_state_command handler: {e}")
+        await message.reply("❌ An error occurred. Please try again.")
 
 # -------- STATE HANDLER --------
 @dp.message()
@@ -2225,7 +2231,10 @@ async def handle_all_messages(message: types.Message):
             
     except Exception as e:
         logger.error(f"❌ Error in handle_all_messages: {e}", exc_info=True)
-        await message.reply("❌ An error occurred. Please try again.")
+        try:
+            await message.reply("❌ An error occurred. Please try again.")
+        except:
+            pass  # Message might be too old to reply
 
 # -------- SEARCH FLOW HANDLER --------
 async def handle_search_flow(message: types.Message, state: Dict):
@@ -2235,122 +2244,127 @@ async def handle_search_flow(message: types.Message, state: Dict):
     current_step = state["step"]
     search = state.setdefault("search", {})
     
-    if current_step == "search_carat":
-        search["carat"] = text
-        state["step"] = "search_shape"
-        await message.reply("Enter Shape(s) (e.g., round, oval) or 'any':")
-        
-    elif current_step == "search_shape":
-        search["shape"] = text
-        state["step"] = "search_color"
-        await message.reply("Enter Color(s) (e.g., d, e, f) or 'any':")
-        
-    elif current_step == "search_color":
-        search["color"] = text
-        state["step"] = "search_clarity"
-        await message.reply("Enter Clarity(ies) (e.g., vs, vvs) or 'any':")
-        
-    elif current_step == "search_clarity":
-        search["clarity"] = text
-        
-        user = get_logged_user(uid)
-        if not user:
-            await message.reply("❌ Session expired. Please login again.")
-            user_state.pop(uid, None)
-            return
-        
-        df = load_stock()
-        if df.empty:
-            await message.reply("❌ No diamonds available in stock.")
-            user_state.pop(uid, None)
-            return
-        
-        filtered_df = df.copy()
-        
-        # Carat filter
-        if search["carat"] != "any":
-            try:
-                if "-" in search["carat"]:
-                    min_carat, max_carat = map(float, search["carat"].split("-"))
-                    filtered_df = filtered_df[
-                        (filtered_df["Weight"] >= min_carat) & 
-                        (filtered_df["Weight"] <= max_carat)
-                    ]
-                else:
-                    target_carat = float(search["carat"])
-                    filtered_df = filtered_df[
-                        (filtered_df["Weight"] >= target_carat * 0.9) & 
-                        (filtered_df["Weight"] <= target_carat * 1.1)
-                    ]
-            except:
-                await message.reply("❌ Invalid carat format. Use like '1.5' or '1-2'")
+    try:
+        if current_step == "search_carat":
+            search["carat"] = text
+            state["step"] = "search_shape"
+            await message.reply("Enter Shape(s) (e.g., round, oval) or 'any':")
+            
+        elif current_step == "search_shape":
+            search["shape"] = text
+            state["step"] = "search_color"
+            await message.reply("Enter Color(s) (e.g., d, e, f) or 'any':")
+            
+        elif current_step == "search_color":
+            search["color"] = text
+            state["step"] = "search_clarity"
+            await message.reply("Enter Clarity(ies) (e.g., vs, vvs) or 'any':")
+            
+        elif current_step == "search_clarity":
+            search["clarity"] = text
+            
+            user = get_logged_user(uid)
+            if not user:
+                await message.reply("❌ Session expired. Please login again.")
                 user_state.pop(uid, None)
                 return
-        
-        # Shape filter
-        if search["shape"] != "any":
-            shapes = [s.strip() for s in search["shape"].split(",")]
-            filtered_df = filtered_df[
-                filtered_df["Shape"].str.lower().isin([s.lower() for s in shapes])
-            ]
-        
-        # Color filter
-        if search["color"] != "any":
-            colors = [c.strip().upper() for c in search["color"].split(",")]
-            filtered_df = filtered_df[
-                filtered_df["Color"].str.upper().isin(colors)
-            ]
-        
-        # Clarity filter
-        if search["clarity"] != "any":
-            clarities = [c.strip().upper() for c in search["clarity"].split(",")]
-            filtered_df = filtered_df[
-                filtered_df["Clarity"].str.upper().isin(clarities)
-            ]
-        
-        if filtered_df.empty:
-            await message.reply("❌ No diamonds match your search criteria.")
-            user_state.pop(uid, None)
-            return
-        
-        total_diamonds = len(filtered_df)
-        total_carats = filtered_df["Weight"].sum()
-        
-        if total_diamonds > 10:
-            with TempFileManager(suffix=".xlsx") as excel_path:
-                filtered_df.to_excel(excel_path, index=False)
-                
-                await message.reply_document(
-                    types.FSInputFile(excel_path),
-                    caption=(
-                        f"💎 Found {total_diamonds} diamonds\n"
-                        f"📊 Total weight: {total_carats:.2f} ct\n"
-                        f"🎯 Your filters:\n"
-                        f"• Carat: {search['carat']}\n"
-                        f"• Shape: {search['shape']}\n"
-                        f"• Color: {search['color']}\n"
-                        f"• Clarity: {search['clarity']}"
+            
+            df = load_stock()
+            if df.empty:
+                await message.reply("❌ No diamonds available in stock.")
+                user_state.pop(uid, None)
+                return
+            
+            filtered_df = df.copy()
+            
+            # Carat filter
+            if search["carat"] != "any":
+                try:
+                    if "-" in search["carat"]:
+                        min_carat, max_carat = map(float, search["carat"].split("-"))
+                        filtered_df = filtered_df[
+                            (filtered_df["Weight"] >= min_carat) & 
+                            (filtered_df["Weight"] <= max_carat)
+                        ]
+                    else:
+                        target_carat = float(search["carat"])
+                        filtered_df = filtered_df[
+                            (filtered_df["Weight"] >= target_carat * 0.9) & 
+                            (filtered_df["Weight"] <= target_carat * 1.1)
+                        ]
+                except:
+                    await message.reply("❌ Invalid carat format. Use like '1.5' or '1-2'")
+                    user_state.pop(uid, None)
+                    return
+            
+            # Shape filter
+            if search["shape"] != "any":
+                shapes = [s.strip() for s in search["shape"].split(",")]
+                filtered_df = filtered_df[
+                    filtered_df["Shape"].str.lower().isin([s.lower() for s in shapes])
+                ]
+            
+            # Color filter
+            if search["color"] != "any":
+                colors = [c.strip().upper() for c in search["color"].split(",")]
+                filtered_df = filtered_df[
+                    filtered_df["Color"].str.upper().isin(colors)
+                ]
+            
+            # Clarity filter
+            if search["clarity"] != "any":
+                clarities = [c.strip().upper() for c in search["clarity"].split(",")]
+                filtered_df = filtered_df[
+                    filtered_df["Clarity"].str.upper().isin(clarities)
+                ]
+            
+            if filtered_df.empty:
+                await message.reply("❌ No diamonds match your search criteria.")
+                user_state.pop(uid, None)
+                return
+            
+            total_diamonds = len(filtered_df)
+            total_carats = filtered_df["Weight"].sum()
+            
+            if total_diamonds > 10:
+                with TempFileManager(suffix=".xlsx") as excel_path:
+                    filtered_df.to_excel(excel_path, index=False)
+                    
+                    await message.reply_document(
+                        types.FSInputFile(excel_path),
+                        caption=(
+                            f"💎 Found {total_diamonds} diamonds\n"
+                            f"📊 Total weight: {total_carats:.2f} ct\n"
+                            f"🎯 Your filters:\n"
+                            f"• Carat: {search['carat']}\n"
+                            f"• Shape: {search['shape']}\n"
+                            f"• Color: {search['color']}\n"
+                            f"• Clarity: {search['clarity']}"
+                        )
                     )
-                )
-        else:
-            for _, row in filtered_df.iterrows():
-                msg = (
-                    f"💎 **{row['Stock #']}**\n"
-                    f"📐 Shape: {row.get('Shape', 'N/A')}\n"
-                    f"⚖️ Weight: {row.get('Weight', 'N/A')} ct\n"
-                    f"🎨 Color: {row.get('Color', 'N/A')}\n"
-                    f"✨ Clarity: {row.get('Clarity', 'N/A')}\n"
-                    f"💰 Price: ${row.get('Price Per Carat', 'N/A')}/ct\n"
-                    f"🔒 Status: {row.get('LOCKED', 'NO')}\n"
-                    f"🏛 Lab: {row.get('Lab', 'N/A')}"
-                )
-                await message.reply(msg, parse_mode=ParseMode.MARKDOWN)
-        
-        log_activity(user, "SEARCH", {
-            "filters": search,
-            "results": total_diamonds
-        })
-        
+            else:
+                for _, row in filtered_df.iterrows():
+                    msg = (
+                        f"💎 **{row['Stock #']}**\n"
+                        f"📐 Shape: {row.get('Shape', 'N/A')}\n"
+                        f"⚖️ Weight: {row.get('Weight', 'N/A')} ct\n"
+                        f"🎨 Color: {row.get('Color', 'N/A')}\n"
+                        f"✨ Clarity: {row.get('Clarity', 'N/A')}\n"
+                        f"💰 Price: ${row.get('Price Per Carat', 'N/A')}/ct\n"
+                        f"🔒 Status: {row.get('LOCKED', 'NO')}\n"
+                        f"🏛 Lab: {row.get('Lab', 'N/A')}"
+                    )
+                    await message.reply(msg, parse_mode=ParseMode.MARKDOWN)
+            
+            log_activity(user, "SEARCH", {
+                "filters": search,
+                "results": total_diamonds
+            })
+            
+            user_state.pop(uid, None)
+    except Exception as e:
+        logger.error(f"❌ Error in search flow: {e}")
+        await message.reply("❌ An error occurred during search.")
         user_state.pop(uid, None)
 
 # -------- DEAL FLOW HANDLER --------
@@ -2360,97 +2374,102 @@ async def handle_deal_flow(message: types.Message, state: Dict):
     text = message.text.strip()
     current_step = state["step"]
     
-    if current_step == "deal_stone":
-        state["stone_id"] = text
-        state["step"] = "deal_price"
-        await message.reply("💰 Enter your offer price ($ per carat):")
-        
-    elif current_step == "deal_price":
-        try:
-            offer_price = float(text)
-            if offer_price <= 0:
-                await message.reply("❌ Price must be greater than zero.")
+    try:
+        if current_step == "deal_stone":
+            state["stone_id"] = text
+            state["step"] = "deal_price"
+            await message.reply("💰 Enter your offer price ($ per carat):")
+            
+        elif current_step == "deal_price":
+            try:
+                offer_price = float(text)
+                if offer_price <= 0:
+                    await message.reply("❌ Price must be greater than zero.")
+                    return
+            except:
+                await message.reply("❌ Please enter a valid number.")
                 return
-        except:
-            await message.reply("❌ Please enter a valid number.")
-            return
-        
-        user = get_logged_user(uid)
-        if not user:
-            await message.reply("❌ Session expired. Please login again.")
-            user_state.pop(uid, None)
-            return
-        
-        stone_id = state["stone_id"]
-        
-        df = load_stock()
-        stone_row = df[df["Stock #"] == stone_id]
-        
-        if stone_row.empty:
-            await message.reply("❌ Stone not found.")
-            user_state.pop(uid, None)
-            return
-        
-        if stone_row.iloc[0].get("LOCKED") == "YES":
-            await message.reply("🔒 This stone is already locked in another deal.")
-            user_state.pop(uid, None)
-            return
-        
-        deal_id = f"DEAL-{uuid.uuid4().hex[:10].upper()}"
-        stone_data = stone_row.iloc[0]
-        
-        deal = {
-            "deal_id": deal_id,
-            "stone_id": stone_id,
-            "supplier_username": stone_data.get("SUPPLIER", "").replace("supplier_", ""),
-            "client_username": user["USERNAME"],
-            "actual_stock_price": float(stone_data.get("Price Per Carat", 0)),
-            "client_offer_price": offer_price,
-            "supplier_action": "PENDING",
-            "admin_action": "PENDING",
-            "final_status": "OPEN",
-            "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
-        }
-        
-        if not atomic_lock_stone(stone_id):
-            await message.reply("🔒 Stone is no longer available.")
-            user_state.pop(uid, None)
-            return
-        
-        if s3:
-            deal_key = f"{DEALS_FOLDER}{deal_id}.json"
-            s3.put_object(
-                Bucket=CONFIG["AWS_BUCKET"],
-                Key=deal_key,
-                Body=json.dumps(deal, indent=2),
-                ContentType="application/json"
+            
+            user = get_logged_user(uid)
+            if not user:
+                await message.reply("❌ Session expired. Please login again.")
+                user_state.pop(uid, None)
+                return
+            
+            stone_id = state["stone_id"]
+            
+            df = load_stock()
+            stone_row = df[df["Stock #"] == stone_id]
+            
+            if stone_row.empty:
+                await message.reply("❌ Stone not found.")
+                user_state.pop(uid, None)
+                return
+            
+            if stone_row.iloc[0].get("LOCKED") == "YES":
+                await message.reply("🔒 This stone is already locked in another deal.")
+                user_state.pop(uid, None)
+                return
+            
+            deal_id = f"DEAL-{uuid.uuid4().hex[:10].upper()}"
+            stone_data = stone_row.iloc[0]
+            
+            deal = {
+                "deal_id": deal_id,
+                "stone_id": stone_id,
+                "supplier_username": stone_data.get("SUPPLIER", "").replace("supplier_", ""),
+                "client_username": user["USERNAME"],
+                "actual_stock_price": float(stone_data.get("Price Per Carat", 0)),
+                "client_offer_price": offer_price,
+                "supplier_action": "PENDING",
+                "admin_action": "PENDING",
+                "final_status": "OPEN",
+                "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+            }
+            
+            if not atomic_lock_stone(stone_id):
+                await message.reply("🔒 Stone is no longer available.")
+                user_state.pop(uid, None)
+                return
+            
+            if s3:
+                deal_key = f"{DEALS_FOLDER}{deal_id}.json"
+                s3.put_object(
+                    Bucket=CONFIG["AWS_BUCKET"],
+                    Key=deal_key,
+                    Body=json.dumps(deal, indent=2),
+                    ContentType="application/json"
+                )
+            
+            log_deal_history(deal)
+            
+            save_notification(
+                deal["supplier_username"],
+                "supplier",
+                f"📩 New deal offer for Stone {stone_id}\n"
+                f"💰 Offer: ${offer_price}/ct"
             )
-        
-        log_deal_history(deal)
-        
-        save_notification(
-            deal["supplier_username"],
-            "supplier",
-            f"📩 New deal offer for Stone {stone_id}\n"
-            f"💰 Offer: ${offer_price}/ct"
-        )
-        
-        log_activity(user, "REQUEST_DEAL", {
-            "stone_id": stone_id,
-            "offer_price": offer_price,
-            "deal_id": deal_id
-        })
-        
-        await message.reply(
-            f"✅ Deal request sent successfully!\n\n"
-            f"📋 **Deal ID:** {deal_id}\n"
-            f"💎 **Stone ID:** {stone_id}\n"
-            f"💰 **Your Offer:** ${offer_price}/ct\n"
-            f"⏳ **Status:** Waiting for supplier response\n\n"
-            f"Use '🤝 View Deals' to check status.",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
+            
+            log_activity(user, "REQUEST_DEAL", {
+                "stone_id": stone_id,
+                "offer_price": offer_price,
+                "deal_id": deal_id
+            })
+            
+            await message.reply(
+                f"✅ Deal request sent successfully!\n\n"
+                f"📋 **Deal ID:** {deal_id}\n"
+                f"💎 **Stone ID:** {stone_id}\n"
+                f"💰 **Your Offer:** ${offer_price}/ct\n"
+                f"⏳ **Status:** Waiting for supplier response\n\n"
+                f"Use '🤝 View Deals' to check status.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            user_state.pop(uid, None)
+    except Exception as e:
+        logger.error(f"❌ Error in deal flow: {e}")
+        await message.reply("❌ An error occurred during deal request.")
         user_state.pop(uid, None)
 
 # -------- LOGGED IN BUTTON HANDLERS --------
@@ -3384,6 +3403,9 @@ async def handle_document(message: types.Message):
             await message.reply("🔒 Please login first.")
             return
         
+        # Always acknowledge receipt first
+        await message.reply("📥 Received your file. Processing...")
+        
         if message.document.file_size > 10 * 1024 * 1024:
             await message.reply("❌ File too large. Max size is 10MB.")
             return
@@ -3418,7 +3440,10 @@ async def handle_document(message: types.Message):
             
     except Exception as e:
         logger.error(f"❌ Error in handle_document: {e}", exc_info=True)
-        await message.reply(f"❌ Error processing file: {str(e)}")
+        try:
+            await message.reply(f"❌ Error processing file: {str(e)}")
+        except:
+            pass
         
     finally:
         if temp_path and os.path.exists(temp_path):
