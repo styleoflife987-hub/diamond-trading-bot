@@ -6,6 +6,6 @@ boto3==1.37.10
 openpyxl==3.1.5
 pytz==2025.2
 python-multipart==0.0.20
-aiofiles==24.1.0
+aiofiles==23.2.1          # Changed from 24.1.0 to match aiogram requirement
 aiohttp==3.11.14
 certifi==2025.1.31
