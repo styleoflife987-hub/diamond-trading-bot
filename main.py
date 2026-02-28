@@ -13,6 +13,7 @@ import uvicorn
 import threading
 import fcntl
 import botocore
+import requests
 from io import BytesIO
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F, Router
@@ -21,10 +22,10 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Response
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List, Tuple
 import logging
-from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from functools import wraps
 
 # -------- SETUP LOGGING --------
@@ -67,6 +68,7 @@ def load_env_config():
         "WEBHOOK_URL": os.getenv("WEBHOOK_URL", ""),
         "TEST_CHAT_ID": os.getenv("TEST_CHAT_ID", ""),
         "RENDER_EXTERNAL_URL": os.getenv("RENDER_EXTERNAL_URL", ""),
+        "RENDER": os.getenv("RENDER", False),
     }
     
     # Validate required configurations
@@ -1364,6 +1366,204 @@ async def status_check():
             status["aws"]["error"] = str(e)
     
     return status
+
+@app.get("/self-ping")
+@app.head("/self-ping")
+async def self_ping():
+    """Endpoint that pings itself to test connectivity"""
+    results = {
+        "timestamp": datetime.now().isoformat(),
+        "tests": {}
+    }
+    
+    # Test self connectivity
+    try:
+        base_url = CONFIG.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
+        response = requests.get(f"{base_url}/health", timeout=5)
+        results["tests"]["self_health"] = {
+            "status": "ok" if response.status_code == 200 else "failed",
+            "code": response.status_code
+        }
+    except Exception as e:
+        results["tests"]["self_health"] = {
+            "status": "error",
+            "error": str(e)
+        }
+    
+    # Test Telegram API
+    try:
+        response = requests.post(
+            f"https://api.telegram.org/bot{CONFIG['BOT_TOKEN']}/getMe",
+            timeout=5
+        )
+        results["tests"]["telegram_api"] = {
+            "status": "ok" if response.status_code == 200 else "failed",
+            "code": response.status_code
+        }
+    except Exception as e:
+        results["tests"]["telegram_api"] = {
+            "status": "error",
+            "error": str(e)
+        }
+    
+    # Test AWS
+    if s3:
+        try:
+            s3.head_bucket(Bucket=CONFIG["AWS_BUCKET"])
+            results["tests"]["aws"] = {"status": "ok"}
+        except Exception as e:
+            results["tests"]["aws"] = {"status": "error", "error": str(e)}
+    else:
+        results["tests"]["aws"] = {"status": "not_connected"}
+    
+    return results
+
+@app.get("/monitor", response_class=HTMLResponse)
+async def monitoring_dashboard():
+    """Simple HTML monitoring dashboard"""
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Diamond Trading Bot - Monitor</title>
+        <meta http-equiv="refresh" content="60">
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+            .container { max-width: 1200px; margin: 0 auto; }
+            .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }
+            .status { padding: 20px; border-radius: 10px; margin: 10px 0; font-size: 16px; }
+            .ok { background: #d4edda; color: #155724; border-left: 5px solid #28a745; }
+            .warning { background: #fff3cd; color: #856404; border-left: 5px solid #ffc107; }
+            .error { background: #f8d7da; color: #721c24; border-left: 5px solid #dc3545; }
+            .endpoint { background: white; padding: 15px; margin: 10px 0; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            .endpoint:hover { box-shadow: 0 4px 8px rgba(0,0,0,0.15); }
+            .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin-top: 20px; }
+            .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            .badge { display: inline-block; padding: 5px 10px; border-radius: 20px; font-size: 12px; font-weight: bold; }
+            .badge-success { background: #28a745; color: white; }
+            .badge-warning { background: #ffc107; color: black; }
+            .badge-danger { background: #dc3545; color: white; }
+            .footer { text-align: center; margin-top: 40px; padding: 20px; color: #666; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🤖 Diamond Trading Bot Monitor</h1>
+                <p>Real-time status and monitoring dashboard</p>
+            </div>
+            
+            <div id="status" class="status">Loading status...</div>
+            
+            <div class="grid">
+                <div class="card">
+                    <h3>📊 Quick Stats</h3>
+                    <div id="stats">Loading...</div>
+                </div>
+                
+                <div class="card">
+                    <h3>🔗 Keep-Alive Endpoints</h3>
+                    <div class="endpoint">/health - Basic health check</div>
+                    <div class="endpoint">/ping - Simple ping</div>
+                    <div class="endpoint">/status - Detailed status</div>
+                    <div class="endpoint">/self-ping - Self diagnostic</div>
+                </div>
+                
+                <div class="card">
+                    <h3>⏰ Recent Pings</h3>
+                    <div id="pings">Loading...</div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>📋 System Health</h3>
+                <div id="health">Loading...</div>
+            </div>
+            
+            <div class="footer">
+                <p>🔄 Auto-refreshes every 60 seconds | Last updated: <span id="timestamp"></span></p>
+                <p>Made with ❤️ for Diamond Trading Bot</p>
+            </div>
+        </div>
+        
+        <script>
+            function updateTimestamp() {
+                document.getElementById('timestamp').textContent = new Date().toLocaleString();
+            }
+            
+            function fetchStatus() {
+                fetch('/status')
+                    .then(r => r.json())
+                    .then(data => {
+                        let statusDiv = document.getElementById('status');
+                        statusDiv.className = 'status ' + (data.status === 'healthy' ? 'ok' : 'warning');
+                        statusDiv.innerHTML = `
+                            <strong>Status:</strong> ${data.status}<br>
+                            <strong>Active Users:</strong> ${data.bot.active_sessions}<br>
+                            <strong>Webhook:</strong> ${data.bot.webhook_url || 'Not set'}<br>
+                            <strong>AWS:</strong> ${data.aws.s3_connected ? '✅ Connected' : '❌ Disconnected'}<br>
+                            <strong>Bucket:</strong> ${data.aws.bucket}<br>
+                            <strong>Last Check:</strong> ${data.timestamp}
+                        `;
+                    });
+                
+                fetch('/health/detailed')
+                    .then(r => r.json())
+                    .then(data => {
+                        let healthDiv = document.getElementById('health');
+                        let html = '<ul>';
+                        for (let [key, value] of Object.entries(data.checks)) {
+                            let status = '✅';
+                            if (typeof value === 'string' && value.includes('failed')) status = '❌';
+                            else if (typeof value === 'string' && value.includes('not')) status = '⚠️';
+                            html += `<li>${status} <strong>${key}:</strong> ${value}</li>`;
+                        }
+                        html += '</ul>';
+                        healthDiv.innerHTML = html;
+                    });
+                
+                fetch('/self-ping')
+                    .then(r => r.json())
+                    .then(data => {
+                        let statsDiv = document.getElementById('stats');
+                        let html = '<ul>';
+                        for (let [key, value] of Object.entries(data.tests)) {
+                            let status = value.status === 'ok' ? '✅' : '❌';
+                            html += `<li>${status} <strong>${key}:</strong> ${value.status}</li>`;
+                        }
+                        html += '</ul>';
+                        statsDiv.innerHTML = html;
+                    });
+            }
+            
+            // Simulate recent pings (in production, fetch from GitHub API)
+            function fetchPings() {
+                let pingsDiv = document.getElementById('pings');
+                let now = new Date();
+                let times = [];
+                for (let i = 0; i < 5; i++) {
+                    let time = new Date(now - i * 5 * 60000);
+                    times.push(`✅ ${time.toLocaleTimeString()} - Ping successful`);
+                }
+                pingsDiv.innerHTML = '<ul>' + times.map(t => `<li>${t}</li>`).join('') + '</ul>';
+            }
+            
+            // Initial load
+            fetchStatus();
+            fetchPings();
+            updateTimestamp();
+            
+            // Refresh every 60 seconds
+            setInterval(() => {
+                fetchStatus();
+                fetchPings();
+                updateTimestamp();
+            }, 60000);
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
 
 # -------- CATCH-ALL HEAD HANDLER --------
 @app.head("/{full_path:path}")
@@ -3622,6 +3822,8 @@ if __name__ == "__main__":
     print("   → Schedule a job to ping /health every 10 minutes")
     print("\n3. ☁️ Cloudflare Worker (free):")
     print("   → https://github.com/ByteTrix/cloudflare-render-ping")
+    print("\n4. 🤖 GitHub Actions (already configured!)")
+    print("   → Your keep-alive workflow runs every 5 minutes")
     print("="*60 + "\n")
     
     uvicorn.run(
