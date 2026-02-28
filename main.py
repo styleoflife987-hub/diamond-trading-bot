@@ -2222,7 +2222,35 @@ async def handle_all_messages(message: types.Message):
         
         # Handle button presses for logged in users
         if user:
-            await handle_logged_in_buttons(message, user)
+            # Check if it's a menu button
+            menu_buttons = [
+                "💎 View All Stock", "👥 View Users", "⏳ Pending Accounts", 
+                "🏆 Supplier Leaderboard", "🤝 View Deals", "📑 User Activity Report",
+                "🗑 Delete Supplier Stock", "🚪 Logout", "📤 Upload Excel", 
+                "📦 My Stock", "📊 My Analytics", "📥 Download Sample Excel",
+                "💎 Search Diamonds", "🔥 Smart Deals", "🤝 Request Deal"
+            ]
+            
+            if text in menu_buttons:
+                await handle_logged_in_buttons(message, user)
+            else:
+                # If it's not a menu button but user is logged in, show appropriate menu
+                role = user.get("ROLE", "").lower()
+                if role == "supplier":
+                    await message.reply(
+                        "Please use the menu buttons below to navigate:",
+                        reply_markup=supplier_kb
+                    )
+                elif role == "admin":
+                    await message.reply(
+                        "Please use the menu buttons below to navigate:",
+                        reply_markup=admin_kb
+                    )
+                elif role == "client":
+                    await message.reply(
+                        "Please use the menu buttons below to navigate:",
+                        reply_markup=client_kb
+                    )
         else:
             await message.reply(
                 "🔒 Please login first using /login\n"
@@ -3403,40 +3431,35 @@ async def handle_document(message: types.Message):
             await message.reply("🔒 Please login first.")
             return
         
+        # Check if user is supplier
+        if user["ROLE"] != "supplier":
+            await message.reply("❌ Only suppliers can upload stock files.")
+            return
+        
         # Always acknowledge receipt first
         await message.reply("📥 Received your file. Processing...")
         
+        # Check file size
         if message.document.file_size > 10 * 1024 * 1024:
             await message.reply("❌ File too large. Max size is 10MB.")
             return
         
+        # Check file extension
         file_name = message.document.file_name.lower()
         if not file_name.endswith(('.xlsx', '.xls')):
             await message.reply("❌ Only Excel files (.xlsx, .xls) are allowed.")
             return
         
+        # Download file
         file = await bot.get_file(message.document.file_id)
         temp_path = f"/tmp/{uid}_{int(time.time())}_{file_name}"
         await bot.download_file(file.file_path, temp_path)
         
+        # Read Excel file
         df = pd.read_excel(temp_path)
         
-        state = user_state.get(uid, {})
-        
-        if user["ROLE"] == "supplier" and not state.get("step") == "bulk_deal_excel":
-            await handle_supplier_stock_upload(message, user, df, temp_path)
-            
-        elif user["ROLE"] == "client" and state.get("step") == "bulk_deal_excel":
-            await handle_bulk_deal_requests(message, user, df, temp_path)
-            
-        elif user["ROLE"] == "admin":
-            await handle_admin_deal_approvals(message, user, df, temp_path)
-            
-        elif user["ROLE"] == "supplier" and "Deal ID" in df.columns:
-            await handle_supplier_deal_responses(message, user, df, temp_path)
-            
-        else:
-            await message.reply("❌ Invalid file format or action.")
+        # Process supplier stock upload
+        await handle_supplier_stock_upload(message, user, df, temp_path)
             
     except Exception as e:
         logger.error(f"❌ Error in handle_document: {e}", exc_info=True)
@@ -3446,6 +3469,7 @@ async def handle_document(message: types.Message):
             pass
         
     finally:
+        # Clean up temp file
         if temp_path and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
@@ -3455,7 +3479,7 @@ async def handle_document(message: types.Message):
 async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str):
     """Handle supplier stock upload"""
     try:
-        # Validate using the new validator
+        # Validate using the validator
         supplier_name = f"supplier_{user['USERNAME'].lower()}"
         validator = DiamondExcelValidator()
         success, cleaned_df, errors, warnings = validator.validate_and_parse(df, supplier_name)
@@ -3489,10 +3513,21 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
         # Rebuild combined stock
         rebuild_combined_stock()
         
+        # Calculate statistics
         total_stones = len(cleaned_df)
         total_carats = cleaned_df["Weight"].sum() if "Weight" in cleaned_df.columns else 0
         total_value = (cleaned_df["Weight"] * cleaned_df["Price Per Carat"]).sum() if "Weight" in cleaned_df.columns and "Price Per Carat" in cleaned_df.columns else 0
         
+        # Get appropriate keyboard based on role
+        role = user.get("ROLE", "").lower()
+        if role == "supplier":
+            kb = supplier_kb
+        elif role == "admin":
+            kb = admin_kb
+        else:
+            kb = client_kb
+        
+        # Success message with menu reminder
         success_msg = (
             f"✅ **Stock Upload Successful!**\n\n"
             f"📊 **Statistics:**\n"
@@ -3503,7 +3538,8 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
             f"• Min: ${cleaned_df['Price Per Carat'].min():,.0f}/ct\n"
             f"• Avg: ${cleaned_df['Price Per Carat'].mean():,.0f}/ct\n"
             f"• Max: ${cleaned_df['Price Per Carat'].max():,.0f}/ct\n\n"
-            f"🔄 Combined stock has been updated."
+            f"🔄 Combined stock has been updated.\n\n"
+            f"📌 **Use the menu buttons below to continue:**"
         )
         
         if warnings:
@@ -3511,7 +3547,7 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
             for warning in warnings[:3]:
                 success_msg += f"⚠️ {warning}\n"
         
-        await message.reply(success_msg, parse_mode=ParseMode.MARKDOWN)
+        await message.reply(success_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
         
         log_activity(user, "UPLOAD_STOCK", {
             "stones": total_stones,
@@ -3522,8 +3558,9 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
             
     except Exception as e:
         logger.error(f"❌ Error in handle_supplier_stock_upload: {e}")
-        await message.reply("❌ Failed to upload stock.")
+        await message.reply("❌ Failed to upload stock. Please try again.")
 
+# -------- BULK DEAL HANDLERS --------
 async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.DataFrame, file_path: str):
     """Handle client bulk deal requests"""
     try:
@@ -3615,7 +3652,7 @@ async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.D
             if len(failed_deals) > 10:
                 result_msg += f"... and {len(failed_deals) - 10} more\n"
         
-        await message.reply(result_msg, parse_mode=ParseMode.MARKDOWN)
+        await message.reply(result_msg, parse_mode=ParseMode.MARKDOWN, reply_markup=client_kb)
         
         user_state.pop(message.from_user.id, None)
         
@@ -3713,7 +3750,7 @@ async def handle_admin_deal_approvals(message: types.Message, user: Dict, df: pd
                 logger.error(f"Failed to process deal {deal_id}: {e}")
                 continue
         
-        await message.reply(f"✅ Processed {processed} deal approvals.")
+        await message.reply(f"✅ Processed {processed} deal approvals.", reply_markup=admin_kb)
         log_activity(user, "PROCESS_DEAL_APPROVALS", {"count": processed})
         
     except Exception as e:
@@ -3808,7 +3845,7 @@ async def handle_supplier_deal_responses(message: types.Message, user: Dict, df:
                 logger.error(f"Failed to process deal {deal_id}: {e}")
                 continue
         
-        await message.reply(f"✅ Processed {processed} deal responses.")
+        await message.reply(f"✅ Processed {processed} deal responses.", reply_markup=supplier_kb)
         log_activity(user, "PROCESS_DEAL_RESPONSES", {"count": processed})
         
     except Exception as e:
