@@ -19,11 +19,12 @@ from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
+from aiogram.enums import ParseMode
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Response
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List, Tuple
 import logging
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from functools import wraps
 
 # -------- SETUP LOGGING --------
@@ -163,7 +164,7 @@ except Exception as e:
     s3 = None
 
 # -------- INITIALIZE BOT --------
-bot = Bot(token=CONFIG["BOT_TOKEN"])
+bot = Bot(token=CONFIG["BOT_TOKEN"], parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
@@ -185,7 +186,8 @@ admin_kb = ReplyKeyboardMarkup(
         [KeyboardButton(text="🗑 Delete Supplier Stock")],
         [KeyboardButton(text="🚪 Logout")]
     ],
-    resize_keyboard=True
+    resize_keyboard=True,
+    is_persistent=True
 )
 
 client_kb = ReplyKeyboardMarkup(
@@ -195,7 +197,8 @@ client_kb = ReplyKeyboardMarkup(
         [KeyboardButton(text="🤝 Request Deal")],
         [KeyboardButton(text="🚪 Logout")]
     ],
-    resize_keyboard=True
+    resize_keyboard=True,
+    is_persistent=True
 )
 
 supplier_kb = ReplyKeyboardMarkup(
@@ -207,7 +210,8 @@ supplier_kb = ReplyKeyboardMarkup(
         [KeyboardButton(text="📥 Download Sample Excel")],
         [KeyboardButton(text="🚪 Logout")]
     ],
-    resize_keyboard=True
+    resize_keyboard=True,
+    is_persistent=True
 )
 
 # -------- TEMP FILE MANAGER --------
@@ -1132,14 +1136,27 @@ async def lifespan(app: FastAPI):
         # Set webhook
         webhook_url = CONFIG["WEBHOOK_URL"]
         if webhook_url and "your-app-name" not in webhook_url:
+            # Delete any existing webhook first
+            await bot.delete_webhook(drop_pending_updates=True)
+            logger.info("✅ Existing webhook deleted")
+            
+            # Set new webhook
             await bot.set_webhook(
                 url=webhook_url,
                 drop_pending_updates=True,
-                allowed_updates=dp.resolve_used_update_types()
+                allowed_updates=["message", "callback_query"],
+                max_connections=40
             )
             logger.info(f"✅ Webhook set to: {webhook_url}")
+            
+            # Get webhook info to verify
+            webhook_info = await bot.get_webhook_info()
+            logger.info(f"📊 Webhook info: {webhook_info}")
         else:
-            logger.warning("⚠️ No valid webhook URL set")
+            logger.warning("⚠️ No valid webhook URL set. Bot will use polling?")
+            # Fallback to polling for local development
+            asyncio.create_task(dp.start_polling(bot))
+            logger.info("✅ Started polling as fallback")
         
     except Exception as e:
         logger.error(f"❌ Startup error: {e}")
@@ -1182,7 +1199,7 @@ app = FastAPI(title="Diamond Trading Bot", lifespan=lifespan)
 
 # -------- HEALTH CHECK ENDPOINTS WITH HEAD SUPPORT --------
 @app.get("/")
-@app.head("/")  # Add HEAD support
+@app.head("/")
 async def root():
     """Root endpoint with HEAD support"""
     return {
@@ -1199,7 +1216,7 @@ async def root():
     }
 
 @app.get("/health")
-@app.head("/health")  # Add HEAD support for UptimeRobot
+@app.head("/health")
 async def health_check():
     """Health check endpoint for Render monitoring and keep-alive"""
     status = "healthy" if BOT_STARTED else "starting"
@@ -1215,10 +1232,18 @@ async def health_check():
         except:
             pass
     
+    # Check webhook
+    webhook_status = "unknown"
+    try:
+        webhook_info = await bot.get_webhook_info()
+        webhook_status = "ok" if webhook_info.url else "not set"
+    except:
+        webhook_status = "error"
+    
     return {
         "status": status,
         "bot": "running" if BOT_STARTED else "stopped",
-        "webhook": "set" if CONFIG["WEBHOOK_URL"] else "not set",
+        "webhook": webhook_status,
         "aws": aws_status,
         "bucket_accessible": bucket_accessible,
         "active_users": len(logged_in_users),
@@ -1227,7 +1252,7 @@ async def health_check():
     }
 
 @app.get("/health/detailed")
-@app.head("/health/detailed")  # Add HEAD support
+@app.head("/health/detailed")
 async def detailed_health():
     """Comprehensive health check for monitoring"""
     health_status = {
@@ -1267,10 +1292,21 @@ async def detailed_health():
     # Check active sessions
     health_status["checks"]["sessions"] = f"{len(logged_in_users)} active"
     
+    # Check webhook
+    try:
+        webhook_info = await bot.get_webhook_info()
+        health_status["checks"]["webhook"] = {
+            "url": webhook_info.url,
+            "pending_updates": webhook_info.pending_update_count,
+            "last_error": webhook_info.last_error_message
+        }
+    except Exception as e:
+        health_status["checks"]["webhook"] = f"error: {str(e)}"
+    
     return health_status
 
 @app.get("/ping")
-@app.head("/ping")  # Add HEAD support
+@app.head("/ping")
 async def ping():
     """Simple ping endpoint for keep-alive"""
     return {
@@ -1283,7 +1319,7 @@ async def ping():
     }
 
 @app.get("/status")
-@app.head("/status")  # Add HEAD support
+@app.head("/status")
 async def status_check():
     """Comprehensive status check"""
     status = {
@@ -1336,7 +1372,33 @@ async def catch_all_head(full_path: str):
     logger.debug(f"HEAD request received for path: /{full_path}")
     return Response(status_code=200)
 
-# -------- OTHER ENDPOINTS (Keep existing GET endpoints) --------
+# -------- WEBHOOK ENDPOINT (CRITICAL!) --------
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    """Handle Telegram webhook updates"""
+    try:
+        # Get the raw request body
+        body = await request.body()
+        
+        # Parse update
+        update_data = json.loads(body)
+        logger.info(f"📨 Received webhook update: {update_data.get('update_id')}")
+        
+        # Create Update object
+        telegram_update = types.Update(**update_data)
+        
+        # Process the update
+        await dp.feed_update(bot=bot, update=telegram_update)
+        
+        return {"status": "ok"}
+    except json.JSONDecodeError as e:
+        logger.error(f"❌ JSON decode error in webhook: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# -------- OTHER ENDPOINTS --------
 @app.get("/sessions")
 async def get_sessions():
     """Admin endpoint to view active sessions"""
@@ -1344,6 +1406,23 @@ async def get_sessions():
         "active_sessions": len(logged_in_users),
         "sessions": {str(k): v for k, v in logged_in_users.items()}
     }
+
+@app.get("/webhook-info")
+async def get_webhook_info():
+    """Get current webhook information"""
+    try:
+        webhook_info = await bot.get_webhook_info()
+        return {
+            "url": webhook_info.url,
+            "has_custom_certificate": webhook_info.has_custom_certificate,
+            "pending_update_count": webhook_info.pending_update_count,
+            "last_error_date": webhook_info.last_error_date,
+            "last_error_message": webhook_info.last_error_message,
+            "max_connections": webhook_info.max_connections,
+            "allowed_updates": webhook_info.allowed_updates
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/keep-alive-instructions")
 async def keep_alive_instructions():
@@ -1378,7 +1457,50 @@ async def keep_alive_instructions():
         "note": "Ping at least every 10-14 minutes to prevent sleeping"
     }
 
-# -------- NEW API ENDPOINTS FOR EXCEL UPLOAD --------
+@app.get("/setwebhook")
+async def set_webhook_endpoint():
+    """Manual endpoint to set webhook (for testing)"""
+    try:
+        webhook_url = CONFIG["WEBHOOK_URL"]
+        if not webhook_url or "your-app-name" in webhook_url:
+            return {"status": "error", "error": "Please set a valid WEBHOOK_URL in environment variables"}
+        
+        await bot.set_webhook(
+            url=webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=["message", "callback_query"]
+        )
+        return {"status": "success", "webhook_url": webhook_url}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+@app.get("/deletewebhook")
+async def delete_webhook_endpoint():
+    """Manual endpoint to delete webhook"""
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        return {"status": "success", "message": "Webhook deleted"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+@app.get("/test")
+async def test_bot():
+    """Test if bot can send messages"""
+    try:
+        # Send a test message to yourself
+        test_chat_id = CONFIG.get("TEST_CHAT_ID")
+        if test_chat_id and test_chat_id.isdigit():
+            await bot.send_message(
+                chat_id=int(test_chat_id),
+                text="🤖 Bot is working! Test message."
+            )
+            return {"status": "success", "message": "Test message sent"}
+        else:
+            return {"status": "warning", "message": "TEST_CHAT_ID not set or is invalid"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+# -------- API ENDPOINTS FOR EXCEL UPLOAD --------
 @app.post("/api/upload-excel")
 async def api_upload_excel(
     file: UploadFile = File(...),
@@ -1574,63 +1696,6 @@ async def api_download_template():
             content={"success": False, "message": f"Error generating template: {str(e)}"}
         )
 
-@app.post("/webhook")
-async def telegram_webhook(request: Request):
-    """Handle Telegram webhook updates"""
-    try:
-        update_data = await request.json()
-        logger.info(f"📨 Received webhook update type: {update_data.get('update_id')}")
-        
-        telegram_update = types.Update(**update_data)
-        await dp.feed_update(bot=bot, update=telegram_update)
-        return {"status": "ok"}
-    except Exception as e:
-        logger.error(f"❌ Webhook error: {e}", exc_info=True)
-        raise HTTPException(status_code=400, detail=str(e))
-
-@app.get("/setwebhook")
-async def set_webhook_endpoint():
-    """Manual endpoint to set webhook (for testing)"""
-    try:
-        webhook_url = CONFIG["WEBHOOK_URL"]
-        if not webhook_url or "your-app-name" in webhook_url:
-            return {"status": "error", "error": "Please set a valid WEBHOOK_URL in environment variables"}
-        
-        await bot.set_webhook(
-            url=webhook_url,
-            drop_pending_updates=True,
-            allowed_updates=dp.resolve_used_update_types()
-        )
-        return {"status": "success", "webhook_url": webhook_url}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
-@app.get("/deletewebhook")
-async def delete_webhook_endpoint():
-    """Manual endpoint to delete webhook"""
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        return {"status": "success", "message": "Webhook deleted"}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
-@app.get("/test")
-async def test_bot():
-    """Test if bot can send messages"""
-    try:
-        # Send a test message to yourself
-        test_chat_id = CONFIG.get("TEST_CHAT_ID")
-        if test_chat_id and test_chat_id.isdigit():
-            await bot.send_message(
-                chat_id=int(test_chat_id),
-                text="🤖 Bot is working! Test message."
-            )
-            return {"status": "success", "message": "Test message sent"}
-        else:
-            return {"status": "warning", "message": "TEST_CHAT_ID not set or is invalid"}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
 # -------- COMMAND HANDLERS --------
 @dp.message(Command("start"))
 async def start(message: types.Message):
@@ -1646,6 +1711,7 @@ async def start(message: types.Message):
         logger.info(f"✅ /start command handled for user {message.from_user.id}")
     except Exception as e:
         logger.error(f"❌ Error in /start handler: {e}")
+        await message.reply("❌ An error occurred. Please try again.")
 
 @dp.message(Command("help"))
 async def help_command(message: types.Message):
@@ -1673,7 +1739,7 @@ async def help_command(message: types.Message):
 
 **Need help?** Contact system administrator.
 """
-        await message.reply(help_text)
+        await message.reply(help_text, parse_mode=ParseMode.MARKDOWN)
         logger.info(f"✅ /help command handled for user {message.from_user.id}")
     except Exception as e:
         logger.error(f"❌ Error in /help handler: {e}")
@@ -1774,7 +1840,7 @@ async def handle_all_messages(message: types.Message):
     """Main message handler for state-based flows"""
     try:
         uid = message.from_user.id
-        text = message.text.strip()
+        text = message.text.strip() if message.text else ""
         
         logger.info(f"📩 Received message from {uid}: {text[:50]}...")
         
@@ -1933,7 +1999,7 @@ async def handle_all_messages(message: types.Message):
                     if len(notifications) > 5:
                         note_msg += f"... and {len(notifications) - 5} more\n"
                     
-                    await message.reply(note_msg)
+                    await message.reply(note_msg, parse_mode=ParseMode.MARKDOWN)
                 
                 user_state.pop(uid, None)
                 return
@@ -2078,7 +2144,7 @@ async def handle_search_flow(message: types.Message, state: Dict):
                     f"🔒 Status: {row.get('LOCKED', 'NO')}\n"
                     f"🏛 Lab: {row.get('Lab', 'N/A')}"
                 )
-                await message.reply(msg)
+                await message.reply(msg, parse_mode=ParseMode.MARKDOWN)
         
         log_activity(user, "SEARCH", {
             "filters": search,
@@ -2143,7 +2209,7 @@ async def handle_deal_flow(message: types.Message, state: Dict):
             "supplier_action": "PENDING",
             "admin_action": "PENDING",
             "final_status": "OPEN",
-            "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")  # FIXED: Corrected format
+            "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
         }
         
         if not atomic_lock_stone(stone_id):
@@ -2181,7 +2247,8 @@ async def handle_deal_flow(message: types.Message, state: Dict):
             f"💎 **Stone ID:** {stone_id}\n"
             f"💰 **Your Offer:** ${offer_price}/ct\n"
             f"⏳ **Status:** Waiting for supplier response\n\n"
-            f"Use '🤝 View Deals' to check status."
+            f"Use '🤝 View Deals' to check status.",
+            parse_mode=ParseMode.MARKDOWN
         )
         
         user_state.pop(uid, None)
@@ -2277,7 +2344,7 @@ async def view_all_stock(message: types.Message, user: Dict):
         for shape, count in shape_counts.items():
             summary += f"• {shape}: {count}\n"
         
-        await message.reply(summary)
+        await message.reply(summary, parse_mode=ParseMode.MARKDOWN)
         
         with TempFileManager(suffix=".xlsx") as excel_path:
             df.to_excel(excel_path, index=False)
@@ -2318,7 +2385,7 @@ async def view_users(message: types.Message, user: Dict):
         for status, count in approval_stats.items():
             stats_msg += f"• {status}: {count}\n"
         
-        await message.reply(stats_msg)
+        await message.reply(stats_msg, parse_mode=ParseMode.MARKDOWN)
         
         with TempFileManager(suffix=".xlsx") as excel_path:
             df.to_excel(excel_path, index=False)
@@ -2355,7 +2422,8 @@ async def pending_accounts(message: types.Message, user: Dict):
                 f"👤 **Username:** {row['USERNAME']}\n"
                 f"🔑 **Role:** {row['ROLE']}\n"
                 f"⏳ **Status:** Pending Approval",
-                reply_markup=kb
+                reply_markup=kb,
+                parse_mode=ParseMode.MARKDOWN
             )
         
         log_activity(user, "VIEW_PENDING_ACCOUNTS")
@@ -2394,7 +2462,7 @@ async def supplier_leaderboard(message: types.Message, user: Dict):
                 f"   🏦 Total Value: ${stats['Total_Value']:,.2f}\n\n"
             )
         
-        await message.reply(leaderboard_msg)
+        await message.reply(leaderboard_msg, parse_mode=ParseMode.MARKDOWN)
         
         with TempFileManager(suffix=".xlsx") as excel_path:
             supplier_stats.to_excel(excel_path)
@@ -2442,7 +2510,8 @@ async def delete_supplier_stock(message: types.Message, user: Dict):
             "⚠️ **WARNING: This will delete ALL supplier stock files.**\n\n"
             "This action cannot be undone.\n"
             "Are you sure you want to continue?",
-            reply_markup=kb
+            reply_markup=kb,
+            parse_mode=ParseMode.MARKDOWN
         )
         
     except Exception as e:
@@ -2468,7 +2537,8 @@ async def upload_excel_prompt(message: types.Message, user: Dict):
             "• Max size: 10MB\n"
             "• Format: .xlsx or .xls\n"
             "• No duplicate Stock #\n\n"
-            "Send your file now or use '📥 Download Sample Excel' first."
+            "Send your file now or use '📥 Download Sample Excel' first.",
+            parse_mode=ParseMode.MARKDOWN
         )
         
         log_activity(user, "UPLOAD_PROMPT")
@@ -2518,7 +2588,7 @@ async def supplier_my_stock(message: types.Message, user: Dict):
                         for shape, count in shape_counts.items():
                             stats_msg += f"• {shape}: {count}\n"
                 
-                await message.reply(stats_msg)
+                await message.reply(stats_msg, parse_mode=ParseMode.MARKDOWN)
                 
                 await message.reply_document(
                     types.FSInputFile(local_path),
@@ -2608,7 +2678,7 @@ async def supplier_analytics(message: types.Message, user: Dict):
         else:
             summary_msg += "• Prices are well balanced with market\n"
         
-        await message.reply(summary_msg)
+        await message.reply(summary_msg, parse_mode=ParseMode.MARKDOWN)
         
         with TempFileManager(suffix=".xlsx") as excel_path:
             results_df.to_excel(excel_path, index=False)
@@ -2718,7 +2788,8 @@ async def search_diamonds_start(message: types.Message, user: Dict):
             "**Examples:**\n"
             "• 1.5 (for approximately 1.5 carat)\n"
             "• 1-2 (for range 1 to 2 carats)\n"
-            "• any (for any carat weight)"
+            "• any (for any carat weight)",
+            parse_mode=ParseMode.MARKDOWN
         )
         
         log_activity(user, "START_SEARCH")
@@ -2765,7 +2836,7 @@ async def smart_deals(message: types.Message, user: Dict):
                 f"   🔒 Status: {deal.get('LOCKED', 'NO')}\n\n"
             )
         
-        await message.reply(deals_msg)
+        await message.reply(deals_msg, parse_mode=ParseMode.MARKDOWN)
         
         if len(good_deals) > 5:
             with TempFileManager(suffix=".xlsx") as excel_path:
@@ -2850,7 +2921,7 @@ async def request_deal_start(message: types.Message, user: Dict):
             
             stones_msg += "Enter the **Stock #** of the stone you want to make an offer on:"
             
-            await message.reply(stones_msg)
+            await message.reply(stones_msg, parse_mode=ParseMode.MARKDOWN)
         
         log_activity(user, "START_DEAL_REQUEST")
         
@@ -2944,7 +3015,7 @@ async def view_deals(message: types.Message, user: Dict):
         for status, count in status_counts.items():
             summary_msg += f"• {status}: {count}\n"
         
-        await message.reply(summary_msg)
+        await message.reply(summary_msg, parse_mode=ParseMode.MARKDOWN)
         
         excel_data = []
         for deal in filtered_deals:
@@ -3175,7 +3246,7 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
                 for warning in warnings[:3]:
                     error_msg += f"⚠️ {warning}\n"
             
-            await message.reply(error_msg)
+            await message.reply(error_msg, parse_mode=ParseMode.MARKDOWN)
             return
         
         # Save to S3
@@ -3215,7 +3286,7 @@ async def handle_supplier_stock_upload(message: types.Message, user: Dict, df: p
             for warning in warnings[:3]:
                 success_msg += f"⚠️ {warning}\n"
         
-        await message.reply(success_msg)
+        await message.reply(success_msg, parse_mode=ParseMode.MARKDOWN)
         
         log_activity(user, "UPLOAD_STOCK", {
             "stones": total_stones,
@@ -3281,7 +3352,7 @@ async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.D
                 "supplier_action": "PENDING",
                 "admin_action": "PENDING",
                 "final_status": "OPEN",
-                "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")  # FIXED: Corrected format
+                "created_at": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
             }
             
             if not atomic_lock_stone(stone_id):
@@ -3319,7 +3390,7 @@ async def handle_bulk_deal_requests(message: types.Message, user: Dict, df: pd.D
             if len(failed_deals) > 10:
                 result_msg += f"... and {len(failed_deals) - 10} more\n"
         
-        await message.reply(result_msg)
+        await message.reply(result_msg, parse_mode=ParseMode.MARKDOWN)
         
         user_state.pop(message.from_user.id, None)
         
